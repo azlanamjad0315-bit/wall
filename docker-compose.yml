@@ -1,0 +1,283 @@
+# ============================================================================
+# DemoSites AI - 100% free, self-hosted stack
+# n8n (workflow engine) + ai-gateway (AI/leads/deploy brain) + WAHA (WhatsApp)
+# Optional profiles: baserow (CRM), local-ai (Ollama), tunnel (Cloudflare),
+#                    voicenote (free TTS sidecar)
+#
+#   docker compose up -d                      # core
+#   docker compose --profile baserow up -d     # + CRM UI
+#   docker compose --profile local-ai up -d    # + Ollama (offline AI)
+#   docker compose --profile tunnel up -d      # + public webhook (free)
+# ============================================================================
+name: demosites-ai
+
+services:
+  # ---------------------------------------------------------------- n8n -----
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest          # install ke baad pin kar lein
+    container_name: demosites_n8n
+    restart: unless-stopped
+    depends_on:
+      ai-gateway:
+        condition: service_started
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      # --- yeh 3 n8n ke liye zaroori hain ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      # PUBLIC_URL = woh address jisse duniya aapke n8n tak pahunche (webhook ke liye)
+      # tunnel profile on hai to cloudflared ka URL yahan daalein
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678/}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
+      GENERIC_TIMEZONE: ${TZ:-Asia/Karachi}
+      TZ: ${TZ:-Asia/Karachi}
+      # Code node / expressions se $env padhne ke liye (default hi false hai, phir bhi explicit)
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # AI site generation slow ho sakti hai (Ollama) -> timeout 15 min
+      EXECUTIONS_TIMEOUT: ${N8N_EXEC_TIMEOUT:-900}
+      EXECUTIONS_TIMEOUT_MAX: 3600
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: ${EXEC_RETENTION_HOURS:-168}
+      # AI workflow dobara-dobara na chale
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY:-5}
+      EXECUTIONS_MODE: regular
+      # --- saare baaki keys / config (.env se aate hain) ---
+      GATEWAY_URL: http://ai-gateway:8787
+      AI_PROVIDER_CHAIN: ${AI_PROVIDER_CHAIN:-gemini,groq,ollama}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-gpt-oss-120b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
+      OVERPASS_URL: ${OVERPASS_URL:-https://overpass-api.de/api/interpreter}
+      NOMINATIM_URL: ${NOMINATIM_URL:-https://nominatim.openstreetmap.org}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      CONTACT_PHONE: ${CONTACT_PHONE:-}
+      WHATSAPP_NUMBER: ${WHATSAPP_NUMBER:-}
+      AGENCY_NAME: ${AGENCY_NAME:-}
+      PRICE_LABEL: ${PRICE_LABEL:-PKR 15,000 one-time}
+      PRICE_MAP: ${PRICE_MAP:-}
+      PAY_METHODS: ${PAY_METHODS:-}
+      PAY_ACCOUNT_NAME: ${PAY_ACCOUNT_NAME:-}
+      MAX_LEADS_PER_DAY: ${MAX_LEADS_PER_DAY:-20}
+      MAX_OUTREACH_PER_DAY: ${MAX_OUTREACH_PER_DAY:-25}
+      OUTREACH_MIN_DELAY_SECONDS: ${OUTREACH_MIN_DELAY_SECONDS:-90}
+      OUTREACH_MAX_DELAY_SECONDS: ${OUTREACH_MAX_DELAY_SECONDS:-280}
+      AUTO_REPLY_ENABLED: ${AUTO_REPLY_ENABLED:-true}
+      AUTO_REPLY_MAX_PER_THREAD: ${AUTO_REPLY_MAX_PER_THREAD:-2}
+      DEMO_BADGE: ${DEMO_BADGE:-true}
+      DEPLOY_TARGET: ${DEPLOY_TARGET:-github-pages}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      PAGES_BASE_URL: ${PAGES_BASE_URL:-}
+      CF_PAGES_PROJECT: ${CF_PAGES_PROJECT:-}
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
+      CF_API_TOKEN: ${CF_API_TOKEN:-}
+      CRM_BACKEND: ${CRM_BACKEND:-baserow}
+      BASEROW_URL: ${BASEROW_URL:-http://baserow:8000}
+      BASEROW_TABLE_ID: ${BASEROW_TABLE_ID:-}
+      BASEROW_TOKEN: ${BASEROW_TOKEN:-}
+      WAHA_URL: http://waha:3000
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
+      WAHA_SESSION: ${WAHA_SESSION:-default}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      GMAIL_SMTP_FROM: ${GMAIL_SMTP_FROM:-}
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      # WAHA + gateway container network pe reachable hain:
+      ALLOW_PRIVATE_NETWORK: "true"
+      N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES: "false"
+    volumes:
+      - ./n8n/data:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+      - ./prompts:/prompts:ro
+      - ./config:/config:ro
+      - ./sites:/sites
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5678/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # --------------------------------------------------------- ai-gateway -----
+  # Yeh poore system ka "brain" hai: leads scan, AI calls + fallback,
+  # HTML validation, GitHub/Cloudflare Pages deploy, local preview.
+  ai-gateway:
+    build:
+      context: ./gateway
+    image: demosites/ai-gateway:local
+    container_name: demosites_gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8787}:8787"
+    environment:
+      TZ: ${TZ:-Asia/Karachi}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      DATA_DIR: /data
+      PROMPTS_DIR: /app/prompts
+      CONFIG_DIR: /app/config
+      # --- AI providers (jo bhi bharein, baaki skip ho jayenge) ---
+      AI_PROVIDER_CHAIN: ${AI_PROVIDER_CHAIN:-gemini,groq,ollama}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-240}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-16384}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.85}
+      AI_DAILY_REQUESTS_PER_PROVIDER: ${AI_DAILY_REQUESTS_PER_PROVIDER:-400}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_DISABLE_THINKING: ${GEMINI_DISABLE_THINKING:-true}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-gpt-oss-120b}
+      GROQ_MODEL_FAST: ${GROQ_MODEL_FAST:-gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
+      # --- leads ---
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      NOMINATIM_URL: ${NOMINATIM_URL:-https://nominatim.openstreetmap.org}
+      OVERPASS_URL: ${OVERPASS_URL:-https://overpass-api.de/api/interpreter}
+      OVERPASS_MIRRORS: ${OVERPASS_MIRRORS:-https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter}
+      LEADS_RADIUS_METERS: ${LEADS_RADIUS_METERS:-6000}
+      LEADS_CACHE_HOURS: ${LEADS_CACHE_HOURS:-24}
+      VERIFY_NO_WEBSITE: ${VERIFY_NO_WEBSITE:-false}
+      # --- deploy ---
+      DEPLOY_TARGET: ${DEPLOY_TARGET:-github-pages}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_BRANCH: ${GITHUB_BRANCH:-main}
+      PAGES_BASE_URL: ${PAGES_BASE_URL:-}
+      CF_PAGES_PROJECT: ${CF_PAGES_PROJECT:-}
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
+      CF_API_TOKEN: ${CF_API_TOKEN:-}
+      PUBLIC_PREVIEW_URL: ${PUBLIC_PREVIEW_URL:-}
+      DEMO_BADGE: ${DEMO_BADGE:-true}
+      WHATSAPP_NUMBER: ${WHATSAPP_NUMBER:-}
+      CONTACT_PHONE: ${CONTACT_PHONE:-}
+      AGENCY_NAME: ${AGENCY_NAME:-}
+      PRICE_LABEL: ${PRICE_LABEL:-PKR 15,000 one-time}
+      # --- anti-ban: ek hi lead ko 30 din me do se zyada baar nahi ---
+      LEADS_COOLDOWN_DAYS: ${LEADS_COOLDOWN_DAYS:-30}
+    volumes:
+      - ./gateway/data:/data
+      - ./prompts:/app/prompts:ro
+      - ./config:/app/config:ro
+      - ./sites:/data/public
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 15s
+
+  # ------------------------------------------------------------- WAHA ------
+  # Self-hosted WhatsApp API. Free (Community). Apna purana/spare number use karein.
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: demosites_waha
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WAHA_PORT:-3000}:3000"
+      # dashboard ke liye (browser me http://localhost:3000/dashboard)
+    environment:
+      TZ: ${TZ:-Asia/Karachi}
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USER:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASS:-}
+      WHATSAPP_DEFAULT_ENGINE: ${WAHA_ENGINE:-WEBJS}
+      WAHA_NAMESPACE: all
+      WAHA_PRINT_QR: "true"
+      WAHA_LOG_LEVEL: info
+      WAHA_MEDIA_STORAGE: LOCAL
+      WHATSAPP_FILES_LIFETIME: 0
+      WHATSAPP_FILES_FOLDER: /app/.media
+      # Sirf incoming messages bhejo (state changes ki bheed nahi)
+      # Hook in-network (default) = koi public URL/tunnel nahi chahiye.
+      # Public tunnel use karna ho to .env me WAHA_HOOK_URL ko https://<tunnel>/webhook/waha karein.
+      WHATSAPP_HOOK_URL: ${WAHA_HOOK_URL:-http://n8n:5678/webhook/waha}
+      WHATSAPP_HOOK_EVENTS: message,message.any
+      WAHA_CLIENT_DEVICE_NAME: ${AGENCY_NAME:-DemoSites}
+      # Chrome ko container me chalane ke liye zaroori
+      WAHA_WEBJS_HEADLESS: "true"
+    volumes:
+      - ./waha:/app/.config
+      - ./waha-media:/app/.media
+    shm_size: "1gb"
+
+  # ----------------------------------------------------- Baserow (CRM) ------
+  # Optional: chahiye to  docker compose --profile baserow up -d
+  baserow:
+    image: baserow/baserow:latest                  # --profile baserow
+    profiles: ["baserow"]
+    container_name: demosites_baserow
+    restart: unless-stopped
+    ports:
+      - "${BASEROW_PORT:-8100}:8000"
+    environment:
+      TZ: ${TZ:-Asia/Karachi}
+      BASEROW_PUBLIC_URL: ${BASEROW_PUBLIC_URL:-http://localhost:8100}
+      # local install pe HTTPS cookie fix:
+      DJANGO_SETTINGS_MODULE: baserow.config.settings.dev
+      DISABLE_SCHEMA_EXPORT: "false"
+    volumes:
+      - ./baserow/media:/media
+      - ./baserow/data:/database
+      - ./baserow/backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/baserow/ping/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  # ------------------------------------------------ Ollama (local AI) ------
+  # CPU pe bhi chalta hai (thoda slow). GPU ke liye docs/deployment.md
+  ollama:
+    image: ollama/ollama:latest                    # --profile local-ai
+    profiles: ["local-ai"]
+    container_name: demosites_ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+
+  # --------------------------------------------- Cloudflare quick tunnel ----
+  # Free public HTTPS for WAHA webhook -> n8n. Koi domain/account nahi chahiye.
+  # URL boot pe milta hai: docker compose logs -f tunnel
+  tunnel:
+    image: cloudflare/cloudflared:latest           # --profile tunnel
+    profiles: ["tunnel"]
+    container_name: demosites_tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://n8n:5678
+    environment:
+      TUNNEL_TRANSPORT_PROTOCOL: auto
+
+  # ------------------------------------------- Voice notes (free TTS) ------
+  # WhatsApp pe AI voice note bhejne ke liye (calling ka free substitute)
+  voicenote:
+    build:
+      context: ./calling
+    image: demosites/voicenote:local               # --profile voicenote
+    profiles: ["voicenote"]
+    container_name: demosites_voicenote
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TTS_PORT:-8090}:8090"
+    environment:
+      TZ: ${TZ:-Asia/Karachi}
+      TTS_BACKEND: ${TTS_BACKEND:-auto}            # auto | piper | gtts | edge
+      PIPER_MODEL: ${PIPER_MODEL:-en_US-lessac-medium}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    volumes:
+      - ./calling/models:/models
+      - ./calling/media:/media
+
+volumes:
+  waha-media:

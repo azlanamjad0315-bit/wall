@@ -1,0 +1,7 @@
+# Free TTS sidecar (voice notes)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gtts==2.5.4
+edge-tts==7.0.2
+# Optional, fully-offline neural TTS (bigger image, no internet at runtime):
+# piper-tts==1.2.0

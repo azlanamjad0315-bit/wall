@@ -1,0 +1,1075 @@
+{
+  "name": "02-outreach",
+  "nodes": [
+    {
+      "id": "cac8f88a-a1c2-5ab1-bd01-1398c985393f",
+      "name": "Send windows",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $env.OUTREACH_CRON }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "two windows/day, Mon-Sat (OUTREACH_CRON in .env)"
+    },
+    {
+      "id": "01fddadc-95bf-55cc-8477-08de0475c149",
+      "name": "WAHA status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sessions/' + $env.WAHA_SESSION }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "if the session is not active we must not half-send",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "408af601-94ed-56ba-98a2-dbff4fe2ad07",
+      "name": "WhatsApp connected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        640,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "04cfa388-4989-4aaf-81de-228a40874f2e",
+              "leftValue": "={{ ($json.status && ($json.status.state || $json.status)) == 'active' || (!$json.status && $json.statusCode !== 404) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "true = sendable. False = WAHA down -> we alert instead of queueing."
+    },
+    {
+      "id": "223123cd-ced6-5142-af23-7b4f9773c689",
+      "name": "Read CRM · raw",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_field_names",
+              "value": "true"
+            },
+            {
+              "name": "limit",
+              "value": "100000"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Baserow (self-hosted, free). Swap to Google Sheets: docs/crm.md",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "3daa8699-ee82-54b9-9108-60215436a2bf",
+      "name": "Read CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// Baserow row -> flat lead object + a few derived helpers every workflow needs\nconst src = $input.first().json || {};\nconst rows = Array.isArray(src.results) ? src.results : [];\nconst today = new Date().toISOString().slice(0, 10);\nconst clean = rows.map(r => {\n  const f = {};\n  for (const [k, v] of Object.entries(r)) {\n    if (v === null || v === undefined) { f[k] = ''; continue; }\n    f[k] = (typeof v === 'object' && !Array.isArray(v)) ? (v.text ?? v.value ?? JSON.stringify(v)) : v;\n  }\n  f.row_id = r.id ?? '';\n  const d = s => (s ? Math.floor((Date.now() - new Date(String(s).slice(0, 10)).getTime()) / 864e5) : 9999);\n  f._days_since_out = d(f.sent_at);\n  f._days_since_in = d(f.last_inbound);\n  f._contacted_today = String(f.sent_at || '').startsWith(today);\n  return f;\n});\n// 'keys' is what scan must NOT return again. Retryable statuses are deliberately left out,\n// so yesterday's demo_failed / stalled leads get one more shot today.\nconst RETRYABLE = ['demo_failed', 'scanned', 'stalled', 'deploy_pending'];\nreturn [{ json: { rows: clean,\n                  keys: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) < 0)\n                        .map(r => r.lead_key).filter(Boolean).join(','),\n                  retryable: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) >= 0).length,\n                  count: clean.length, today, empty: clean.length === 0 } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "6083dcb3-8347-5769-814f-0d815693a69c",
+      "name": "Build queue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// quiet hours + daily cap + no-demo-no-send + best-first ordering\nconst rows = ($input.first().json || {}).rows || [];\nconst MAX = parseInt($env.MAX_OUTREACH_PER_DAY || '25', 10);\nconst now = new Date();\nconst mins = now.getHours() * 60 + now.getMinutes();\nconst qs = parseInt($env.QUIET_START_HOUR || '9', 10) * 60;\nconst qe = parseInt($env.QUIET_END_HOUR || '21', 10) * 60;\nif (mins < qs || mins >= qe) {\n  return [{ json: { empty: true, reason: 'quiet hours (' + qs / 60 + ':00-' + qe / 60 + ':00 local)' } }];\n}\nconst ACTIVE = ['contacted', 'replied', 'interested', 'negotiating', 'paid', 'followup_sent',\n                'revision_requested', 'stalled'];\nconst sentToday = rows.filter(r => r._contacted_today && ACTIVE.includes(String(r.status || ''))).length;\nlet room = MAX - sentToday;\nif (room <= 0) return [{ json: { empty: true, reason: 'daily cap ' + MAX + ' already sent today' } }];\nconst today = new Date().toISOString().slice(0, 10);\nconst score = r => (Number(r.hotness) || 0) + (r.whatsapp ? 25 : 0) + (Number(r.rating) >= 4.3 ? 10 : 0)\n                   - (Number(r.outbound_count) || 0) * 45;\nconst cands = rows\n  .filter(r => r.lead_key)\n  .filter(r => ['demo_ready', 'queued', 'stalled'].includes(String(r.status || '')))\n  .filter(r => r.demo_url && /^https:\\/\\//.test(String(r.demo_url)))\n  .filter(r => !r._contacted_today)\n  .filter(r => !r.next_action_at || String(r.next_action_at) <= today)\n  .filter(r => (Number(r.outbound_count) || 0) < 3)\n  .sort((a, b) => score(b) - score(a));\nconst out = [];\nfor (const r of cands) {\n  if (room <= 0) break;\n  if (!r.whatsapp && !r.phone && !r.email) continue;\n  room--;\n  out.push({ json: r });\n}\nif (!out.length) {\n  return [{ json: { empty: true, reason: 'koi demo_ready lead pending nahi (01 chalayein ya CRM status dekhein)' } }];\n}\nreturn out;",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "1a0750de-b446-581a-b9d0-f4efaa3e87ee",
+      "name": "Koi bhejne ko?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "65b5b1ec-a1a3-4b7e-bfa5-da72f6b146e1",
+              "leftValue": "={{ $json.empty !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c06c4caa-ddd1-5786-aaf8-2e274ebb54d9",
+      "name": "Per lead",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1940,
+        40
+      ],
+      "parameters": {
+        "options": {
+          "batchSize": 1,
+          "reset": false
+        }
+      }
+    },
+    {
+      "id": "6ab8a338-a4b4-590b-9f0f-0da4502d9832",
+      "name": "AI: write message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/outreach' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "business_name",
+              "value": "={{ $json.business_name }}"
+            },
+            {
+              "name": "category_label",
+              "value": "={{ $json.category_label }}"
+            },
+            {
+              "name": "city",
+              "value": "={{ $json.city }}"
+            },
+            {
+              "name": "area",
+              "value": "={{ $json.area }}"
+            },
+            {
+              "name": "country",
+              "value": "={{ $json.country }}"
+            },
+            {
+              "name": "demo_url",
+              "value": "={{ $json.demo_url }}"
+            },
+            {
+              "name": "whatsapp",
+              "value": "={{ $json.whatsapp || $json.phone }}"
+            },
+            {
+              "name": "rating",
+              "value": "={{ $json.rating }}"
+            },
+            {
+              "name": "reviews_count",
+              "value": "={{ $json.reviews }}"
+            },
+            {
+              "name": "language",
+              "value": "={{ $json.language || 'auto' }}"
+            },
+            {
+              "name": "notes",
+              "value": "={{ $json.notes }}"
+            },
+            {
+              "name": "gap_note",
+              "value": "={{ $json.website ? 'unke paas sirf social/old link hai: ' + $json.website : '' }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Roman Urdu for PK/BD/IN, English elsewhere; 45-word cap enforced by the prompt",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "f1f59cf5-4003-58a4-a769-62d9a3b685da",
+      "name": "Message safety gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// Nothing leaves until it passes. A banned phrase or a leaked price can cost you the number.\nconst lead = $('Per lead').item.json;\nconst raw = $input.first().json || {};\nlet m = String(raw.message || '').trim();\nconst BANNED = /(dear sir|dear madam|valued customer|i hope this.{0,20}finds you well|limited (period )?offer|100% free|guaranteed|digital presence|boost your (sales|business)|SEO audit|\\ud83d\\ude80|\\ud83d\\udcc8|\\ud83d\\udcb0|\\u2764\\ufe0f\\u2764\\ufe0f)/i;\nconst problems = [];\nconst link = String(lead.demo_url || '').trim();\nif (!m) problems.push('empty');\nif (m.length > 560) problems.push('too long ' + m.length);\nif (BANNED.test(m)) problems.push('banned phrase');\nif (!link) problems.push('no demo url');\nif (link && m.indexOf(link) === -1) problems.push('link not in message');\nif (/(PKR|Rs\\.?)\\s?[0-9]{1,3}[,.]?[0-9]{3}|USD\\s?[0-9]{2,3}|\\bprice\\b/i.test(m)) problems.push('price in first touch');\nconst emoji = (m.match(/[\\ud83c\\udf00-\\ud83e\\uddff]/gu) || []).length;\nif (emoji > 1) problems.push('emoji spam ' + emoji);\nconst fallback = () => {\n  const nm = String(lead.business_name || 'aap').split(' ').slice(0, 2).join(' ');\n  const urdu = String(lead.language || '').indexOf('urdu') >= 0 || ['PK', 'BD', 'IN'].includes(String(lead.country||'').toUpperCase());\n  return urdu\n    ? nm + ', Google par aapki ' + (lead.category_label || 'dukaan') + ' hai magar website nahi.\\n' +\n      'Maine aapke liye ek page bana diya \\u2014 details, timings aur WhatsApp button ke saath.\\n' + link +\n      '\\nDekh lein. Pasand aaye to baat karte hain, abhi koi charge nahi.'\n    : nm + ', you show up on Google but have no website.\\nI made a page for you \\u2014 details, hours, ' +\n      'and a WhatsApp button.\\n' + link + '\\nFree to look at. If you like it, we can talk.';\n};\nif (problems.length) m = fallback();\nif (link && m.indexOf(link) === -1) m = m.replace(/https?:\\/\\/\\S+/, '') .trim() + '\\n' + link;\nconst phone = String(lead.whatsapp || lead.phone || '').replace(/\\D/g, '');\nreturn [{ json: {\n  body: m.slice(0, 560), words: m.trim().split(/\\s+/).length, chatId: phone ? phone + '@c.us' : '',\n  email: lead.email || '', channel: phone ? 'whatsapp' : 'email', fixed: problems.length > 0,\n  problems: problems.join(', '), lead_key: lead.lead_key, row_id: lead.row_id } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "2db2e9c3-a852-52f2-b7e3-b0ca352f3235",
+      "name": "WhatsApp number?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2720,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "0150d422-ec54-4950-bdbc-b0b4900d25bc",
+              "leftValue": "={{ Boolean($json.chatId) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "758d3c04-b0e9-589a-914c-6cd490f8dbfa",
+      "name": "WAHA: typing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/startTyping' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session",
+              "value": "={{ $env.WAHA_SESSION }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $('Message safety gate').item.json.chatId }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "typing indicator first = reads as human",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8a9419db-777d-5cb6-a55a-5a6824fdca53",
+      "name": "Looks human",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3240,
+        40
+      ],
+      "parameters": {
+        "amount": "={{ 3 + Math.floor(Math.random() * 5) }}",
+        "unit": "seconds"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "4788439e-5766-5d71-9921-7718324df3f1",
+      "name": "WAHA: sendText",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3500,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sendText' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session",
+              "value": "={{ $env.WAHA_SESSION }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $('Message safety gate').item.json.chatId }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Message safety gate').item.json.body }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "429/blocked -> error branch records send_failed",
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "4c9b26c9-993d-5180-b521-9fb8298bff6d",
+      "name": "Gmail: send (optional)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2980,
+        240
+      ],
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_SMTP_FROM }}",
+        "toEmail": "={{ $('Message safety gate').item.json.email }}",
+        "subject": "={{ $('AI: write message').item.json.subject }}",
+        "text": "={{ $('Message safety gate').item.json.body }}"
+      },
+      "notesInFlow": true,
+      "notes": "DISABLED by default. To use email: create an SMTP credential (README step 7), then enable this node and set the app password.",
+      "onError": "continueErrorOutput",
+      "disabled": true,
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_ME",
+          "name": "Gmail SMTP"
+        }
+      }
+    },
+    {
+      "id": "fe832272-2868-5b30-bdd6-c01a453a72c1",
+      "name": "Log send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const lead = $('Per lead').item.json;\nconst gate = $('Message safety gate').item.json;\nconst j = $input.first().json || {};\nconst err = j.error || j.message || (j.statusCode ? 'HTTP ' + j.statusCode : '');\nconst ok = !err && (j.id || j.messageId || gate.channel === 'email');\nreturn [{ json: {\n  op: 'upsert', row_id: lead.row_id || '', lead_key: lead.lead_key, business_name: lead.business_name,\n  status: ok ? 'contacted' : 'send_failed', sent_at: new Date().toISOString().slice(0, 10),\n  outbound_count: (Number(lead.outbound_count) || 0) + (ok ? 1 : 0),\n  last_outbound: gate.body, outreach_channel: gate.channel, demo_url: lead.demo_url,\n  category: lead.category, category_label: lead.category_label, city: lead.city,\n  country: lead.country, whatsapp: lead.whatsapp, phone: lead.phone, hotness: lead.hotness,\n  language: lead.language, reply_count: Number(lead.reply_count) || 0,\n  ai_notes: (gate.channel + (gate.fixed ? ' fallback(' + gate.problems + ')' : '') +\n             (ok ? ' ok' : ' ERR ' + String(err).slice(0, 120))).slice(0, 380),\n  next_action_at: ok ? new Date(Date.now() + 2 * 864e5).toISOString().slice(0, 10)\n                     : new Date().toISOString().slice(0, 10) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "147a8043-7974-54b1-9635-80da9731e633",
+      "name": "CRM: mark contacted · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3500,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "58b5ccfb-5cd0-5f82-beb4-d96b9b2f8588",
+      "name": "CRM: mark contacted · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3760,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "357f67da-2c45-45eb-9945-4d506a732adc",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "344fea08-6280-59e1-92fc-b060cf1b65fb",
+      "name": "CRM: mark contacted · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4020,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "acb63d48-2267-5e99-8d2f-64fbdd79b041",
+      "name": "CRM: mark contacted · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4020,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8b5dd426-e9a9-598a-8798-a66891e2c5e9",
+      "name": "Random delay (anti-ban)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        4280,
+        40
+      ],
+      "parameters": {
+        "amount": "={{ Math.floor(Math.random() * Math.max(60, Number($env.OUTREACH_MAX_DELAY_SECONDS || 280))) + Number($env.OUTREACH_MIN_DELAY_SECONDS || 90) }}",
+        "unit": "seconds"
+      },
+      "notesInFlow": true,
+      "notes": "90-280s by default. Below 60s is how numbers get banned \\u2014 don't.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "eb0a22ff-b8f2-5d0d-861c-8cef7a182865",
+      "name": "Run summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const rows = $('Build queue').allItems ? $('Build queue').allItems().map(i => i.json) : [];\nconst queued = rows.filter(r => !r.empty).length;\nlet sent = 0;\ntry { sent = $('Log send').allItems().filter(i => i.json.status === 'contacted').length; } catch (e) {}\nlet failed = 0;\ntry { failed = $('Log send').allItems().filter(i => i.json.status === 'send_failed').length; } catch (e) {}\nreturn [{ json: { queued, sent, failed, reason: (rows.find(r => r.empty) || {}).reason || '' } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "bf15c48c-ff07-5ec5-9bd0-c6fd0c7b990e",
+      "name": "Telegram: sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        240
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  $json.queued\n    ? \"\\ud83d\\udce4 Outreach: \" + $json.sent + \" bheje, \" + $json.failed + \" fail (cap \" + ($env.MAX_OUTREACH_PER_DAY || 25) + \"/day)\\n\" +\n      \"Reply aane par 03 khud classify karega.\"\n    : \"\\u2139\\ufe0f Outreach skip: \" + $json.reason\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Telegram = free alerts. Skip node if TELEGRAM_BOT_TOKEN is empty.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "99fb0cd8-75df-5e19-a480-71fe3d365751",
+      "name": "Telegram: WAHA down",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        240
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"\\ud83d\\udea8 WhatsApp session ACTIVE nahi \\u2192 outreach rok diya (aadhe-adhure message na jayein).\\n\" +\n  \"http://localhost:3000/dashboard \\u2192 session start \\u2192 QR dobara scan.\\n\" +\n  \"docker compose logs waha --tail 30\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "fixed before it silently does nothing for a week",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Send windows": {
+      "main": [
+        [
+          {
+            "node": "WAHA status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA status": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp connected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM · raw": {
+      "main": [
+        [
+          {
+            "node": "Read CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp connected?": {
+      "main": [
+        [
+          {
+            "node": "Read CRM · raw",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: WAHA down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM": {
+      "main": [
+        [
+          {
+            "node": "Build queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build queue": {
+      "main": [
+        [
+          {
+            "node": "Koi bhejne ko?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Koi bhejne ko?": {
+      "main": [
+        [
+          {
+            "node": "Per lead",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Per lead": {
+      "main": [
+        [
+          {
+            "node": "AI: write message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: write message": {
+      "main": [
+        [
+          {
+            "node": "Message safety gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message safety gate": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp number?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp number?": {
+      "main": [
+        [
+          {
+            "node": "WAHA: typing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: send (optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA: typing": {
+      "main": [
+        [
+          {
+            "node": "Looks human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Looks human": {
+      "main": [
+        [
+          {
+            "node": "WAHA: sendText",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA: sendText": {
+      "main": [
+        [
+          {
+            "node": "Log send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: send (optional)": {
+      "main": [
+        [
+          {
+            "node": "Log send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log send": {
+      "main": [
+        [
+          {
+            "node": "CRM: mark contacted · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: mark contacted · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: mark contacted · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: mark contacted · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: mark contacted · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: mark contacted · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: mark contacted · update": {
+      "main": [
+        [
+          {
+            "node": "Random delay (anti-ban)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: mark contacted · create": {
+      "main": [
+        [
+          {
+            "node": "Random delay (anti-ban)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Random delay (anti-ban)": {
+      "main": [
+        [
+          {
+            "node": "Per lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run summary": {
+      "main": [
+        [
+          {
+            "node": "Telegram: sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "versionId": "6d485f0d-ef3c-44d6-8c7a-7430698f98ca"
+}

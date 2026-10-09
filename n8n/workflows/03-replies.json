@@ -1,0 +1,1566 @@
+{
+  "name": "03-replies",
+  "nodes": [
+    {
+      "id": "cb7873e4-d229-5d2c-b216-11e6a290e87a",
+      "name": "WAHA webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "waha",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "notesInFlow": true,
+      "notes": "set WAHA env WHATSAPP_HOOK_URL = <public url>/webhook/waha"
+    },
+    {
+      "id": "36513d87-eab4-5c8d-b1a1-9e89cb9aea20",
+      "name": "ACK 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        380,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ok:true}) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "notesInFlow": true,
+      "notes": "ack first, then think \\u2014 otherwise WAHA retries and you reply twice"
+    },
+    {
+      "id": "954f2c66-5e73-584f-b07a-97a9c08bf4cb",
+      "name": "Parse event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// Only real, human, 1:1 inbound text. Everything else exits here (silently, on purpose).\nconst e = $input.first().json || {};\nconst body = e.body || e;\nconst d = body._data || body;\nconst event = String(body.event || d.eventType || '').toLowerCase();\nconst from = String(d.from || d.chatId || '');\nconst out = (o) => [{ json: { skip: true, why: o } }];\nif (event && event !== 'message' && event !== 'message.any') return out('event=' + event);\nif (!from) return out('no from');\nif (d.fromMe || d.isFromMe) return out('my own message');\nif (/@(g\\.us|newsletter|broadcast|lid)$/.test(from) || from === 'status@broadcast') return out('group/channel');\nconst t = d.text || d.body\n  || (d.message && (d.message.conversation\n      || (d.message.extendedTextMessage && d.message.extendedTextMessage.text))) || '';\nlet text = String(t).trim();\nconst media = Boolean(d.hasMedia || d.mimetype || d.type === 'image' || d.type === 'audio');\nif (!text && media) text = '[media: ' + (d.mimetype || 'file') + ']';\nif (!text) return out('empty body');\nconst chatId = from.includes('@') ? from : from + '@c.us';\nreturn [{ json: {\n  skip: false, chatId, phone: chatId.split('@')[0], text: text.slice(0, 1800),\n  sender: String(d.notifyName || d._data && d._data.notifyName || d.contact || '').slice(0, 60),\n  msgId: d.id || '', ts: new Date(Number(d.timestamp || 0) * 1000 || Date.now()).toISOString(),\n  media, seen: Boolean(d.id && (d.ack >= 3 || d.ack === 'READ')) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "cf070544-20fe-5e40-b0b2-a1011e4ea54f",
+      "name": "Inbound human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "841a9f44-855e-442a-9c80-289ee3cfcd45",
+              "leftValue": "={{ $json.skip !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "17964995-81ba-598c-af4a-d52176717d7d",
+      "name": "Read CRM · raw",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1160,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_field_names",
+              "value": "true"
+            },
+            {
+              "name": "limit",
+              "value": "100000"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "stateless match by phone tail - no DB of threads needed",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8a4e095d-55fa-5430-909f-90e52a38662a",
+      "name": "Read CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// Baserow row -> flat lead object + a few derived helpers every workflow needs\nconst src = $input.first().json || {};\nconst rows = Array.isArray(src.results) ? src.results : [];\nconst today = new Date().toISOString().slice(0, 10);\nconst clean = rows.map(r => {\n  const f = {};\n  for (const [k, v] of Object.entries(r)) {\n    if (v === null || v === undefined) { f[k] = ''; continue; }\n    f[k] = (typeof v === 'object' && !Array.isArray(v)) ? (v.text ?? v.value ?? JSON.stringify(v)) : v;\n  }\n  f.row_id = r.id ?? '';\n  const d = s => (s ? Math.floor((Date.now() - new Date(String(s).slice(0, 10)).getTime()) / 864e5) : 9999);\n  f._days_since_out = d(f.sent_at);\n  f._days_since_in = d(f.last_inbound);\n  f._contacted_today = String(f.sent_at || '').startsWith(today);\n  return f;\n});\n// 'keys' is what scan must NOT return again. Retryable statuses are deliberately left out,\n// so yesterday's demo_failed / stalled leads get one more shot today.\nconst RETRYABLE = ['demo_failed', 'scanned', 'stalled', 'deploy_pending'];\nreturn [{ json: { rows: clean,\n                  keys: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) < 0)\n                        .map(r => r.lead_key).filter(Boolean).join(','),\n                  retryable: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) >= 0).length,\n                  count: clean.length, today, empty: clean.length === 0 } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "4564d50b-1c8b-5187-994d-4ce846a1fbd1",
+      "name": "Find lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// OSM phones vary (0300..., +92 300..., 92300...), so match on the last 10 digits.\nconst ev = $('Parse event').item.json;\nconst rows = ($input.first().json || {}).rows || [];\nconst tail = s => String(s || '').replace(/\\D/g, '').slice(-10);\nconst mine = tail(ev.phone);\nconst row = rows.find(r => mine && (tail(r.whatsapp) === mine || tail(r.phone) === mine));\nif (!row) {\n  return [{ json: { matched: false, chatId: ev.chatId, phone: ev.phone, text: ev.text, ts: ev.ts,\n                    sender: ev.sender, msgId: ev.msgId, media: ev.media } }];\n}\nconst hrs = row.sent_at ? (Date.now() - new Date(String(row.sent_at).slice(0, 10)).getTime()) / 36e5 : 9999;\nreturn [{ json: { matched: true, chatId: ev.chatId, phone: ev.phone, text: ev.text, ts: ev.ts, media: ev.media,\n  msgId: ev.msgId, sender: ev.sender || row.business_name, lead_key: row.lead_key, row_id: row.row_id || '',\n  business_name: row.business_name, category_label: row.category_label, city: row.city,\n  country: row.country, demo_url: row.demo_url, status: row.status, language: row.language || 'auto',\n  ai_reply_count: Number(row.ai_reply_count) || 0, reply_count: Number(row.reply_count) || 0,\n  outbound_count: Number(row.outbound_count) || 0, last_outbound: row.last_outbound || '',\n  notes: row.notes || '', whatsapp: row.whatsapp, hotness: row.hotness,\n  thread_age_hours: Math.round(hrs) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "d367dfe3-5bc3-5a74-8773-d0be2632523e",
+      "name": "CRM me lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "b80b7741-3c1a-4dbb-9a7b-4697892f9bcc",
+              "leftValue": "={{ $json.matched === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "unknown number replied -> alert you, NEVER auto-reply to a stranger"
+    },
+    {
+      "id": "98fd23b8-9bcc-574e-a167-8aa6d103fed0",
+      "name": "AI: classify reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/reply/classify' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message_text",
+              "value": "={{ $('Find lead').item.json.text }}"
+            },
+            {
+              "name": "business_name",
+              "value": "={{ $('Find lead').item.json.business_name }}"
+            },
+            {
+              "name": "sender_name",
+              "value": "={{ $('Find lead').item.json.sender }}"
+            },
+            {
+              "name": "category_label",
+              "value": "={{ $('Find lead').item.json.category_label }}"
+            },
+            {
+              "name": "city",
+              "value": "={{ $('Find lead').item.json.city }}"
+            },
+            {
+              "name": "country",
+              "value": "={{ $('Find lead').item.json.country }}"
+            },
+            {
+              "name": "demo_url",
+              "value": "={{ $('Find lead').item.json.demo_url }}"
+            },
+            {
+              "name": "thread_age_hours",
+              "value": "={{ String($('Find lead').item.json.thread_age_hours || 0) }}"
+            },
+            {
+              "name": "ai_replies_in_thread",
+              "value": "={{ String($('Find lead').item.json.ai_reply_count || 0) }}"
+            },
+            {
+              "name": "last_outbound",
+              "value": "={{ $('Find lead').item.json.last_outbound }}"
+            },
+            {
+              "name": "language",
+              "value": "={{ $('Find lead').item.json.language }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "1 call = intent + should_reply + draft + CRM status (quota friendly)",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "c926d584-111d-59ee-8db1-339ca13b30bf",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// final say on whether the bot may speak: model output + your caps + your guardrails\nconst lead = $('Find lead').item.json;\nconst c = $input.first().json || {};\nconst intent = String(c.intent || 'unclear').toLowerCase();\nconst enabled = String($env.AUTO_REPLY_ENABLED || 'true').toLowerCase().charAt(0) === 't';\nconst cap = parseInt($env.AUTO_REPLY_MAX_PER_THREAD || '2', 10);\nconst RISKY = ['not_interested', 'handoff_needed', 'auto_reply', 'spam', 'objection_price', 'question_other'];\nconst conf = Number(c.confidence || 0);\nlet allow = Boolean(c.should_reply) && enabled && (Number(lead.ai_reply_count) || 0) < cap\n            && conf >= 0.55 && RISKY.indexOf(intent) === -1 && String(c.reply || '').trim().length > 2;\nconst notify = ['interested', 'price_question', 'revision_request', 'objection_trust', 'handoff_needed',\n                'not_interested', 'objection_price'].indexOf(intent) >= 0 || conf < 0.55 ||\n               String($env.ALERT_EVERY_REPLY || 'false') === 'true';\nconst MAP = { interested: 'interested', price_question: 'negotiating', objection_price: 'negotiating',\n  objection_trust: 'negotiating', revision_request: 'revision_requested', not_interested: 'not_interested',\n  handoff_needed: 'handoff', auto_reply: 'auto_reply', spam: 'spam', question_other: 'replied',\n  unclear: 'replied' };\nlet st = (c.lead_status && c.lead_status !== 'keep_current') ? c.lead_status : (MAP[intent] || 'replied');\nconst paid = intent === 'interested' && /screenshot|txn|transaction|paid|payment done|bhej diya|dekh lein? payment/i\n  .test(String(c.reply || '') + ' ' + lead.text);\nreturn [{ json: { ...c, ...lead, intent, confidence: conf, allow_reply: allow, notify,\n  new_status: paid ? 'payment_claimed' : st,\n  payment: Boolean(c.payment_info_sent), guard: allow ? '' : (enabled ? 'held' : 'auto-reply off'),\n  notes: String(lead.notes || '').slice(-1200),\n  next_followup: ['not_interested', 'spam', 'paid', 'payment_claimed'].indexOf(st) >= 0 ? ''\n    : new Date(Date.now() + 864e5).toISOString().slice(0, 10),\n  updated: new Date().toISOString() } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "0ab2e5c5-d9c5-526b-a77e-cd8a4f73eaf3",
+      "name": "CRM update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nreturn [{ json: {\n  op: 'upsert', row_id: d.row_id || '', lead_key: d.lead_key, business_name: d.business_name,\n  status: d.new_status, intent: d.intent, last_inbound: d.ts,\n  reply_count: (Number(d.reply_count) || 0) + 1,\n  ai_reply_count: (Number(d.ai_reply_count) || 0) + (d.allow_reply ? 1 : 0),\n  demo_url: d.demo_url, language: d.language, city: d.city, country: d.country,\n  category_label: d.category_label, phone: d.phone, whatsapp: d.whatsapp, hotness: d.hotness,\n  payment_info_sent: d.payment ? 'yes' : 'no',\n  next_action_at: d.next_followup,\n  notes: (String(d.notes) + ' | ' + String(d.ts).slice(0, 10) + ' [' + d.intent + '] ' +\n          String(d.text).slice(0, 160) + (d.allow_reply ? ' | ai-replied' : ' | held'))\n         .slice(-1500) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "5b97923b-e245-52f4-b2be-cc14f5996650",
+      "name": "CRM: save reply · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "7bca805c-2483-5a4b-820d-a69dbfbaddc7",
+      "name": "CRM: save reply · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2980,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "7a9c099c-25e7-4753-866c-df10eff66a3c",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "5afcfe7f-e81c-589e-8f17-4fc534773414",
+      "name": "CRM: save reply · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3240,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8a9d12d5-bf72-5c67-b67f-5ef7334ea09b",
+      "name": "CRM: save reply · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3240,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2db8205c-b613-565d-8317-1ddadf528b26",
+      "name": "WAHA: mark read",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2460,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sendSeen' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session",
+              "value": "={{ $env.WAHA_SESSION }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $('Find lead').item.json.chatId }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "blue ticks while a human is about to answer = good service",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00649fe0-a02c-536a-aa0f-d71b05924040",
+      "name": "Bot bole?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2460,
+        440
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "ca17723c-6f15-4b8d-b5f0-938a60af2dbf",
+              "leftValue": "={{ $json.allow_reply === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "2054962a-d0c2-5c16-a340-af7cbc0e8f66",
+      "name": "WAHA: reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sendText' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session",
+              "value": "={{ $env.WAHA_SESSION }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $('Decide').item.json.chatId }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Decide').item.json.reply }}"
+            },
+            {
+              "name": "reply_to",
+              "value": "={{ $('Decide').item.json.msgId }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "threads the reply (reply_to) so context is obvious",
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "5ea4eb4d-90b5-5eee-b353-c1410f438574",
+      "name": "Count reply sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2980,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const j = $('Decide').item.json;\nreturn [{ json: { op: 'upsert', row_id: j.row_id || '', lead_key: j.lead_key,\n  last_ai_reply: String(j.reply || '').slice(0, 500), business_name: j.business_name } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "5307c809-9690-51ce-8140-c64d3a7dfe32",
+      "name": "CRM: ai_reply · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        440
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "29cf683c-a636-5b2e-b9cb-dc27c8196f8c",
+      "name": "CRM: ai_reply · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3500,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "25188e2b-8715-478a-bdc6-392d5575ebcf",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "42865b70-c67d-5b5c-928d-e64954aa8b66",
+      "name": "CRM: ai_reply · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3760,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "e9b08379-142f-565d-b5e2-8c64376bfb56",
+      "name": "CRM: ai_reply · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3760,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "6a4bbc33-e7f3-5b39-83e3-febcbb8403e9",
+      "name": "Telegram: alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        440
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"<b>\" + ($json.intent === 'interested' ? '\\ud83d\\udd25 INTERESTED \\u2014 paisa aaj aa sakta hai'\n        : $json.intent === 'not_interested' ? '\\u274c Not interested (filed)'\n        : $json.intent === 'handoff_needed' ? '\\ud83e\\uddd1 Aapko khud jawab dena hai'\n        : '\\ud83d\\udcac ' + String($json.intent).toUpperCase()) + \"</b>\\n\" +\n  $json.business_name + \" \\u2014 \" + ($json.category_label || '') + \", \" + ($json.city || '') + \"\\n\" +\n  \"\\ud83d\\udcf1 https://wa.me/\" + ($json.phone || String($json.chatId || '').split('@')[0]) + \"\\n\" +\n  \"\\ud83d\\udd17 \" + ($json.demo_url || 'no demo') + \"\\n\" +\n  \"\\ud83d\\udcac \" + String($json.text || '').slice(0, 400) + \"\\n\" +\n  \"\\ud83e\\udd16 \" + String($json.summary || 'classified: ' + $json.intent) + \"\\n\" +\n  ($json.allow_reply ? \"\\u2705 AI ne reply kar diya: \" + String($json.reply || '').slice(0, 220) + \"\\n\" +\n     ($json.ai_reply_count + 1) + \"/\" + ($env.AUTO_REPLY_MAX_PER_THREAD || 2) + \" AI replies in thread\"\n   : \"\\u23f8\\ufe0f reply HOLD (\" + ($json.guard || 'risk intent') + \") \\u2192 aap bhejein\") +\n  ($json.payment ? \"\\n\\ud83d\\udcb8 payment details bhej diye: \" + ($env.PAY_METHODS || '') : '') +\n  ($json.intent === 'interested' ? \"\\n\\u27a1\\ufe0f Ab: \" + ($env.PAY_INSTRUCTIONS || 'payment confirm karein') : '')\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "din ka sirf yahi message padhna hai \\u2014 baaki system sambhaal leta hai",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "03c6ce8c-4dd6-569f-a8a3-cdb3cc03d95d",
+      "name": "Classify failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// AI down = do not auto-reply, but ALWAYS tell the human (a missed 'haan' is lost revenue)\nconst lead = $('Find lead').item.json;\nconst j = $input.first().json || {};\nreturn [{ json: { op: 'upsert', row_id: lead.row_id || '', lead_key: lead.lead_key,\n  business_name: lead.business_name, status: lead.status || 'replied', intent: 'model_error',\n  last_inbound: lead.ts, reply_count: (Number(lead.reply_count) || 0) + 1, demo_url: lead.demo_url,\n  whatsapp: lead.whatsapp, phone: lead.phone, city: lead.city, hotness: lead.hotness,\n  next_action_at: new Date().toISOString().slice(0, 10),\n  notes: (String(lead.notes || '') + ' | ai-down: ' + String(j.error || j.message || 'classify failed')\n          .slice(0, 160)).slice(-1500),\n  _alert: String(lead.text || '').slice(0, 300) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "d4034442-7756-5d4e-ba74-70a696d3072e",
+      "name": "CRM: ai_down · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        640
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "eea97060-fa83-5749-994f-72cb625b1d90",
+      "name": "CRM: ai_down · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2720,
+        640
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "5204a69f-443a-4040-a5ef-15bfc8074654",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "61545afb-b1db-5d6c-94c9-5450677abfdd",
+      "name": "CRM: ai_down · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        440
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0a3bd343-9a3e-50c4-921d-505ec628b3f5",
+      "name": "CRM: ai_down · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        640
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8345c18e-2650-5c12-a8bf-f25ea462b889",
+      "name": "Telegram: AI down",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3240,
+        640
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"\\u26a0\\ufe0f Reply aaya magar AI classify nahi kar paya \\u2014 aap khud jawab dein.\\n\" +\n  $json.business_name + \": \" + ($json._alert || '') + \"\\nwa.me/\" + ($json.phone || '') +\n  \"\\ndocker compose logs ai-gateway --tail 30\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Telegram = free alerts. Skip node if TELEGRAM_BOT_TOKEN is empty.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0a5a78f1-0790-5b08-8140-dc95d16965c0",
+      "name": "Unknown number",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const ev = $('Find lead').item.json;\nreturn [{ json: { op: 'upsert', lead_key: 'wa/' + ev.phone, business_name: ev.sender || 'Unknown number',\n  phone: ev.phone, whatsapp: ev.phone, status: 'inbound_unmatched', source: 'manual', intent: 'handoff_needed',\n  last_inbound: ev.ts, reply_count: 1, outbound_count: 0, ai_reply_count: 0, paid: 'no',\n  hotness: 0, next_action_at: new Date().toISOString().slice(0, 10),\n  notes: ('bina CRM entry message: ' + String(ev.text).slice(0, 400)).slice(0, 1500),\n  _chat: ev.chatId, _msg: ev.msgId } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "dc988e83-2b65-5c2d-93c3-5559fdc81c8b",
+      "name": "CRM: log stranger · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        440
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "6be127fb-0f91-5a98-a464-ff4d54e0aea6",
+      "name": "CRM: log stranger · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2460,
+        840
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a79ec045-3f27-40e2-8b39-5afb278d7de9",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "1934a48a-2786-5008-928e-16abb2016df8",
+      "name": "CRM: log stranger · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        840
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "3e684f3c-8a40-510f-b326-548edde16532",
+      "name": "CRM: log stranger · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        1040
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "35a4f05a-0ad5-5744-9061-df3d538c8f0d",
+      "name": "Telegram: new number",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2460,
+        1040
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"\\ud83d\\udd14 Koi anjaan number ne message kiya (CRM me nahi):\\n\" + String($json.notes || '').slice(0, 300) +\n  \"\\n\\ud83d\\udcf1 https://wa.me/\" + ($json.phone || '') + \"\\n\" +\n  \"Dhyan rahe: isko bina soche outreach ka jawab mat dein \\u2014 01 se lead add karein.\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Telegram = free alerts. Skip node if TELEGRAM_BOT_TOKEN is empty.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "86a2eb66-03e7-5f15-8ec5-5fe32644879d",
+      "name": "Ignored",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        440
+      ],
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nreturn [{ json: { why: j.why || 'not actionable', at: new Date().toISOString() } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "kept as a node so you can watch what gets filtered in the execution log",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "WAHA webhook": {
+      "main": [
+        [
+          {
+            "node": "ACK 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ACK 200": {
+      "main": [
+        [
+          {
+            "node": "Parse event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse event": {
+      "main": [
+        [
+          {
+            "node": "Inbound human?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM · raw": {
+      "main": [
+        [
+          {
+            "node": "Read CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inbound human?": {
+      "main": [
+        [
+          {
+            "node": "Read CRM · raw",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read CRM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM": {
+      "main": [
+        [
+          {
+            "node": "Find lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find lead": {
+      "main": [
+        [
+          {
+            "node": "CRM me lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM me lead?": {
+      "main": [
+        [
+          {
+            "node": "AI: classify reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unknown number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: classify reply": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "CRM update",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WAHA: mark read",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Bot bole?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM update": {
+      "main": [
+        [
+          {
+            "node": "CRM: save reply · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save reply · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: save reply · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save reply · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: save reply · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: save reply · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bot bole?": {
+      "main": [
+        [
+          {
+            "node": "WAHA: reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA: reply": {
+      "main": [
+        [
+          {
+            "node": "Count reply sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count reply sent": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_reply · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_reply · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_reply · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_reply · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_reply · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: ai_reply · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify failed": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_down · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_down · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_down · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_down · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: ai_down · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: ai_down · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_down · update": {
+      "main": [
+        [
+          {
+            "node": "Telegram: AI down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: ai_down · create": {
+      "main": [
+        [
+          {
+            "node": "Telegram: AI down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unknown number": {
+      "main": [
+        [
+          {
+            "node": "CRM: log stranger · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: log stranger · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: log stranger · exists?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram: new number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: log stranger · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: log stranger · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: log stranger · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "versionId": "f3a544b0-43c9-4af7-825f-9db4fc4c01ea"
+}

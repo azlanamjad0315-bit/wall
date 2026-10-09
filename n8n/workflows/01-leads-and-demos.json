@@ -1,0 +1,1225 @@
+{
+  "name": "01-leads-and-demos",
+  "nodes": [
+    {
+      "id": "31e8ec13-4ca4-5b14-8653-8d5129c69265",
+      "name": "Daily 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $env.LEADS_CRON }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "cron from .env LEADS_CRON (default: 0 6 * * *)"
+    },
+    {
+      "id": "29686eed-151f-5e8d-88b5-f4ae516bf514",
+      "name": "Budget",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// today's capacity; a manual re-run in the same day continues instead of repeating\nconst max = parseInt($env.MAX_LEADS_PER_DAY || '20', 10);\nreturn [{ json: { max, date: new Date().toISOString().slice(0, 10) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "31edf3eb-cb3a-5b4c-b680-b62d5345b0a7",
+      "name": "Read CRM · raw",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_field_names",
+              "value": "true"
+            },
+            {
+              "name": "limit",
+              "value": "100000"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "supplies known lead_key values so we never rebuild a sent demo",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "87456618-b98f-514d-b5b0-186a2d1ac2c2",
+      "name": "Read CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// Baserow row -> flat lead object + a few derived helpers every workflow needs\nconst src = $input.first().json || {};\nconst rows = Array.isArray(src.results) ? src.results : [];\nconst today = new Date().toISOString().slice(0, 10);\nconst clean = rows.map(r => {\n  const f = {};\n  for (const [k, v] of Object.entries(r)) {\n    if (v === null || v === undefined) { f[k] = ''; continue; }\n    f[k] = (typeof v === 'object' && !Array.isArray(v)) ? (v.text ?? v.value ?? JSON.stringify(v)) : v;\n  }\n  f.row_id = r.id ?? '';\n  const d = s => (s ? Math.floor((Date.now() - new Date(String(s).slice(0, 10)).getTime()) / 864e5) : 9999);\n  f._days_since_out = d(f.sent_at);\n  f._days_since_in = d(f.last_inbound);\n  f._contacted_today = String(f.sent_at || '').startsWith(today);\n  return f;\n});\n// 'keys' is what scan must NOT return again. Retryable statuses are deliberately left out,\n// so yesterday's demo_failed / stalled leads get one more shot today.\nconst RETRYABLE = ['demo_failed', 'scanned', 'stalled', 'deploy_pending'];\nreturn [{ json: { rows: clean,\n                  keys: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) < 0)\n                        .map(r => r.lead_key).filter(Boolean).join(','),\n                  retryable: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) >= 0).length,\n                  count: clean.length, today, empty: clean.length === 0 } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "13a3713e-cb25-5843-8b9f-dc9086161ea0",
+      "name": "Radar: scan OSM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1160,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/leads/scan' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "campaign",
+              "value": "all"
+            },
+            {
+              "name": "limit",
+              "value": "={{ $('Budget').item.json.max * 3 }}"
+            },
+            {
+              "name": "exclude_keys",
+              "value": "={{ $('Read CRM').item.json.keys || '' }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "OpenStreetMap Overpass (free, no key). Returns ONLY businesses with no real website.",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "8050db5f-cbd4-537b-a311-b734ae954506",
+      "name": "Prepare leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// hard filters before we spend any AI quota: reachable, named, not already in the CRM, max/day\nconst raw = $input.first().json || {};\nconst src = Array.isArray(raw.leads) ? raw.leads : [];\nconst max = parseInt($env.MAX_LEADS_PER_DAY || '20', 10);\nconst known = (($('Read CRM').item.json || {}).rows) || [];\nconst rowId = {};\nfor (const r of known) if (r.lead_key) rowId[r.lead_key] = r.row_id || '';\nconst SKIP = /chain|bank|mosque|temple|church|fuel|atm|pharmacy chain|municipal|government|post office/i;\nconst seen = new Set();\nconst out = [];\nfor (const l of src) {\n  const name = String(l.osm_name || l.name || '').trim();\n  if (!name || !l.key || seen.has(l.key)) continue;\n  if (seen.has(name.toLowerCase())) continue;\n  if (!(l.whatsapp || l.phone)) continue;\n  if (SKIP.test(name) || SKIP.test(l.category_label || '')) continue;\n  if (!l.address && !l.city) continue;\n  seen.add(l.key); seen.add(name.toLowerCase());\n  out.push({ json: {\n    op: 'upsert', lead_key: l.key, business_name: name.slice(0, 120),\n    category: l.category || 'services', category_label: l.category_label || 'Local business',\n    city: l.city || '', area: l.area || '', country: (l.country || '').toUpperCase(),\n    address: l.address || '', phone: l.phone || '', whatsapp: l.whatsapp || '',\n    website: l.website || '', rating: l.rating || '', reviews: l.reviews_count || '',\n    hours: l.opening_hours || '', notes: (l.notes || '').slice(0, 900), emoji: l.emoji || '\\ud83c\\udfea',\n    hotness: Number(l.hotness || 0), slug: l.slug || '', language: l.language || 'auto',\n    price_label: l.price_label || '', demo_url: '', status: 'scanned', source: 'overpass',\n    reply_count: 0, outbound_count: 0, ai_reply_count: 0, followup_count: 0, paid: 'no',\n    _stats: JSON.stringify(raw.stats || {}), row_id: rowId[l.key] || '',\n  } });\n  if (out.length >= max) break;\n}\nif (!out.length) {\n  return [{ json: { empty: true, _stats: JSON.stringify(raw.stats || {}),\n                    _err: ((raw.stats || {}).errors || []).slice(0, 2).join(' | ') || 'no fresh OSM leads' } }];\n}\nreturn out;",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "e9e709d4-98d5-53e8-8774-492c95b499bc",
+      "name": "Naye leads?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "fb65be22-92c4-42bb-8dd9-03bb7ec1446b",
+              "leftValue": "={{ $json.empty !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "4134c681-933b-5f3f-bd28-07b95b3f846e",
+      "name": "Per lead",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1940,
+        40
+      ],
+      "parameters": {
+        "options": {
+          "batchSize": 1,
+          "reset": false
+        }
+      }
+    },
+    {
+      "id": "397e085a-891d-517b-ba42-fc66a98dfbbc",
+      "name": "AI: generate demo site",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/demo/generate' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "business_name",
+              "value": "={{ $json.business_name }}"
+            },
+            {
+              "name": "category",
+              "value": "={{ $json.category }}"
+            },
+            {
+              "name": "category_label",
+              "value": "={{ $json.category_label }}"
+            },
+            {
+              "name": "address",
+              "value": "={{ $json.address }}"
+            },
+            {
+              "name": "city",
+              "value": "={{ $json.city }}"
+            },
+            {
+              "name": "area",
+              "value": "={{ $json.area }}"
+            },
+            {
+              "name": "country",
+              "value": "={{ $json.country }}"
+            },
+            {
+              "name": "phone",
+              "value": "={{ $json.phone }}"
+            },
+            {
+              "name": "whatsapp",
+              "value": "={{ $json.whatsapp }}"
+            },
+            {
+              "name": "rating",
+              "value": "={{ $json.rating }}"
+            },
+            {
+              "name": "reviews_count",
+              "value": "={{ $json.reviews }}"
+            },
+            {
+              "name": "opening_hours",
+              "value": "={{ $json.hours }}"
+            },
+            {
+              "name": "notes",
+              "value": "={{ $json.notes }}"
+            },
+            {
+              "name": "slug",
+              "value": "={{ $json.slug }}"
+            },
+            {
+              "name": "language",
+              "value": "={{ $json.language }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "gateway: design seed -> prompt -> 1 self-repair pass -> HTML quality gate",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "e70226da-79cc-58ad-b982-dcf2cf38a1d0",
+      "name": "Site passed gate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2460,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "2b0315dc-296c-4c03-90ac-aefc32e05c64",
+              "leftValue": "={{ $json.ok === true && Boolean($json.html) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "false = the model output failed our checks twice (see CRM note)"
+    },
+    {
+      "id": "35351af7-9b55-5c41-865b-1152c452ec80",
+      "name": "Deploy to Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/site/deploy' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "slug",
+              "value": "={{ $('Per lead').item.json.slug }}"
+            },
+            {
+              "name": "html",
+              "value": "={{ $json.html }}"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.title }}"
+            },
+            {
+              "name": "meta_description",
+              "value": "={{ $json.meta_description }}"
+            },
+            {
+              "name": "business_name",
+              "value": "={{ $('Per lead').item.json.business_name }}"
+            },
+            {
+              "name": "area",
+              "value": "={{ $('Per lead').item.json.area }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "GitHub/CF Pages, then polls the URL until it really returns 200",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "7d4a0cbf-da42-56e7-8678-57ef515f492e",
+      "name": "Result: demo_ready",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2980,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const lead = $('Per lead').item.json;\nconst site = $('AI: generate demo site').first().json;\nconst d = $input.first().json || {};\nreturn [{ json: {\n  op: 'upsert', row_id: lead.row_id || '', lead_key: lead.lead_key, business_name: lead.business_name,\n  category: lead.category, category_label: lead.category_label, city: lead.city, area: lead.area,\n  country: lead.country, address: lead.address, phone: lead.phone, whatsapp: lead.whatsapp,\n  website: lead.website, rating: lead.rating, reviews: lead.reviews, hours: lead.hours,\n  hotness: lead.hotness, emoji: lead.emoji, notes: lead.notes, language: lead.language,\n  demo_slug: d.slug || lead.slug, demo_url: d.url || '', design: site.design || {},\n  site_bytes: site.bytes || 0, ai_provider: site.provider || '', status: d.live ? 'demo_ready' : 'deploy_pending',\n  deploy_target: d.target || '', deploy_note: d.note || '', source: 'overpass',\n  next_action_at: new Date().toISOString().slice(0, 10),\n} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "row_id kept from the CRM read so this updates instead of duplicating",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "a17ef9c0-da70-569f-9eba-6db02a6b3581",
+      "name": "CRM: save demo · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "64cc69df-fb15-5d1e-a292-1bbba213582a",
+      "name": "CRM: save demo · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3500,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "91d87248-fbe4-4457-9345-9f899bedcf08",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "03d44da0-f6ff-552d-bdb9-3e838f24125f",
+      "name": "CRM: save demo · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3760,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "36fc5b76-8570-5c5b-a846-6347b1e04b67",
+      "name": "CRM: save demo · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3760,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "93866c95-fd58-5ed8-b078-608ceb918d3c",
+      "name": "Result: failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const lead = $('Per lead').item.json;\nconst j = $input.first().json || {};\nconst msg = String(j.error || j.message || (j.statusCode ? 'HTTP ' + j.statusCode : '') ||\n                   JSON.stringify(j).slice(0, 200)).slice(0, 500);\nreturn [{ json: { op: 'upsert', row_id: '', lead_key: lead.lead_key, business_name: lead.business_name,\n  category: lead.category, category_label: lead.category_label, city: lead.city, area: lead.area,\n  country: lead.country, phone: lead.phone, whatsapp: lead.whatsapp, hotness: lead.hotness,\n  emoji: lead.emoji, notes: ('demo failed: ' + msg).slice(0, 1400), status: 'demo_failed',\n  language: lead.language, address: lead.address, website: lead.website,\n  row_id: lead.row_id || '',\n  next_action_at: new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "failures are recorded too — that is how you notice a dead API key",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "d1225d19-4bb1-5b18-9376-720863e0bf18",
+      "name": "CRM: save failure · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "8654f526-1da2-5c01-832d-6b84a5d39d2b",
+      "name": "CRM: save failure · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2980,
+        240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "63dee6ca-8fd0-4917-adf1-85c74dc649a7",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "85a2d866-c7fd-5952-8aed-13ab02f92ea6",
+      "name": "CRM: save failure · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3240,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "711281bd-cf4e-576e-882e-fe076ed62bac",
+      "name": "CRM: save failure · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3240,
+        440
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "065ed812-9131-5579-8749-dd4a722d6fea",
+      "name": "AI quota breather",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3500,
+        240
+      ],
+      "parameters": {
+        "amount": "={{ 25 + Math.floor(Math.random() * 30) }}",
+        "unit": "seconds"
+      },
+      "notesInFlow": true,
+      "notes": "spreads calls so a free tier RPM/RPD cap is not hit mid-loop",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "c554682c-cda1-55d7-9ce8-cc7353f2eca7",
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const prep = $('Prepare leads').allItems ? $('Prepare leads').allItems().map(i => i.json) : [];\nconst leads = prep.filter(i => !i.empty);\nlet ready = 0, failed = 0;\ntry { ready = $('Result: demo_ready').allItems().length; } catch (e) {}\ntry { failed = $('Result: failed').allItems().filter(i => i.json.lead_key).length; } catch (e) {}\nconst stats = JSON.parse((leads[0] || prep[0] || {})._stats || '{}');\nreturn [{ json: {\n  scanned: stats.osm_raw || 0, fresh: leads.length, ready, failed,\n  errors: (stats.errors || []).slice(0, 3).join(' | '),\n  lines: leads.slice(0, 10).map(l => '\\u2022 ' + l.business_name + ' (' + (l.city || l.area) + ') hotness ' + l.hotness).join('\\n'),\n} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "39996b6b-c138-5db2-970c-0dd060f4f077",
+      "name": "Telegram: demos ready",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        240
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"<b>\\ud83c\\udf88 Demo sites ban gaye: \" + $json.ready + \"</b>\\n\" +\n  \"OSM scan: \" + $json.scanned + \" POI \\u2192 \" + $json.fresh + \" naye leads\\n\" +\n  ($json.lines ? $json.lines + \"\\n\" : \"\") +\n  ($json.failed ? \"\\u26a0\\ufe0f \" + $json.failed + \" fail (CRM me 'demo_failed' dekh lein)\\n\" : \"\") +\n  ($json.errors ? \"\\u26a0\\ufe0f \" + $json.errors + \"\\n\" : \"\") +\n  \"Workflow 02 aaj inhein bhej dega.\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "yahi aapki subah ki report hai",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "929c01ab-36a4-5ea8-888f-455b2041cb49",
+      "name": "Telegram: no leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        440
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"\\ud83d\\udd0d Aaj koi naya lead nahi.\\n\" + ($json._err || '') +\n  \"\\nCheck: config/campaigns/default.json me areas enabled hain? OVERPASS_URL reachable?\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Telegram = free alerts. Skip node if TELEGRAM_BOT_TOKEN is empty.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "a5b7efa8-f04f-5c0e-998f-698dcb7955f6",
+      "name": "Telegram: scan failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1420,
+        240
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"\\ud83d\\udea9 Lead scan FAIL: \" + String($json.error || $json.message || 'gateway unreachable').slice(0, 300) +\n  \"\\n docker compose logs ai-gateway --tail 40\"\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "gateway down / no AI key -> you hear about it immediately, not tomorrow",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Daily 06:00": {
+      "main": [
+        [
+          {
+            "node": "Budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM · raw": {
+      "main": [
+        [
+          {
+            "node": "Read CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Budget": {
+      "main": [
+        [
+          {
+            "node": "Read CRM · raw",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM": {
+      "main": [
+        [
+          {
+            "node": "Radar: scan OSM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Radar: scan OSM": {
+      "main": [
+        [
+          {
+            "node": "Prepare leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: scan failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare leads": {
+      "main": [
+        [
+          {
+            "node": "Naye leads?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Naye leads?": {
+      "main": [
+        [
+          {
+            "node": "Per lead",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: no leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Per lead": {
+      "main": [
+        [
+          {
+            "node": "AI: generate demo site",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: generate demo site": {
+      "main": [
+        [
+          {
+            "node": "Site passed gate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result: failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Site passed gate?": {
+      "main": [
+        [
+          {
+            "node": "Deploy to Pages",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result: failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deploy to Pages": {
+      "main": [
+        [
+          {
+            "node": "Result: demo_ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Result: demo_ready": {
+      "main": [
+        [
+          {
+            "node": "CRM: save demo · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save demo · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: save demo · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save demo · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: save demo · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: save demo · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Result: failed": {
+      "main": [
+        [
+          {
+            "node": "CRM: save failure · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save failure · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: save failure · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save failure · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: save failure · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: save failure · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save demo · update": {
+      "main": [
+        [
+          {
+            "node": "AI quota breather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save demo · create": {
+      "main": [
+        [
+          {
+            "node": "AI quota breather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save failure · update": {
+      "main": [
+        [
+          {
+            "node": "AI quota breather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save failure · create": {
+      "main": [
+        [
+          {
+            "node": "AI quota breather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI quota breather": {
+      "main": [
+        [
+          {
+            "node": "Per lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summary": {
+      "main": [
+        [
+          {
+            "node": "Telegram: demos ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "versionId": "1e6c4ccf-d787-4a56-b2f6-36c116be8acc"
+}

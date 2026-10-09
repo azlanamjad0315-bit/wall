@@ -1,0 +1,62 @@
+{
+  "_readme": [
+    "Yeh file 'har baar unique design' ka raaz hai.",
+    "gateway/sitegen.py har lead ke liye ek seed choose karta hai (lead id + din se deterministic,)",
+    "taake same lead dobara generate karne pe wahi design aaye, lekin alag-alag leads ke designs alag hoins.",
+    "palette x font x layout x hero = 8*8*6*6 = 2304 combinations. AI ko exact tokens dete hain (CSS values),",
+    "is liye woh 'random accha' nahi balki 'specified accha' banata hai.",
+    "Apne pasand ke colors add kar sakte hain — bas structure same rakhein."
+  ],
+  "palettes": [
+    { "id": "ink-gold",      "bg": "#0d0d0f", "surface": "#17171b", "text": "#f4f1ea", "muted": "#a49f95", "accent": "#c9a227", "accent2": "#f0d878", "vibe": "premium, dark, luxury serif" },
+    { "id": "clean-clinic",  "bg": "#ffffff", "surface": "#f2f7f9", "text": "#0f2a33", "muted": "#5b7684", "accent": "#0e7c86", "accent2": "#8ed1c7", "vibe": "medical trust, airy, calm" },
+    { "id": "warm-bakery",   "bg": "#fff8ef", "surface": "#ffffff", "text": "#3a2a1e", "muted": "#8a7263", "accent": "#c8532b", "accent2": "#e8a33d", "vibe": "appetising, warm, rustic-modern" },
+    { "id": "neon-gym",      "bg": "#0a0a0a", "surface": "#141414", "text": "#f5f5f5", "muted": "#9a9a9a", "accent": "#c6ff00", "accent2": "#00e5ff", "vibe": "athletic, aggressive, high contrast" },
+    { "id": "blush-salon",   "bg": "#fdf7f5", "surface": "#ffffff", "text": "#33222a", "muted": "#8d7681", "accent": "#c46a7f", "accent2": "#e9b8c4", "vibe": "elegant, soft, feminine-neutral" },
+    { "id": "editorial-green","bg": "#f6f4ee", "surface": "#ffffff", "text": "#16241c", "muted": "#5d6b60", "accent": "#1f4d38", "accent2": "#b9975b", "vibe": "magazine, real-estate, sophisticated" },
+    { "id": "retail-pop",    "bg": "#ffffff", "surface": "#fff4e0", "text": "#151515", "muted": "#6b6b6b", "accent": "#ff5722", "accent2": "#1565c0", "vibe": "shop catalogue, energetic, price-forward" },
+    { "id": "mono-tech",     "bg": "#101418", "surface": "#171d23", "text": "#e6edf3", "muted": "#8b98a5", "accent": "#4ea1ff", "accent2": "#7ee787", "vibe": "tech/electronics, precise, grid-heavy" }
+  ],
+  "fonts": [
+    { "id": "fraunces-manrope",  "display": "Fraunces",        "body": "Manrope",        "google": "family=Fraunces:opsz,wght@9..144,400;9..144,700&family=Manrope:wght@400;600;800", "vibe": "soft editorial" },
+    { "id": "playfair-inter",    "display": "Playfair Display","body": "Inter",          "google": "family=Playfair+Display:wght@500;700&family=Inter:wght@400;500;700", "vibe": "classic luxury" },
+    { "id": "space-grotesk",     "display": "Space Grotesk",   "body": "Space Grotesk",  "google": "family=Space+Grotesk:wght@400;500;700", "vibe": "geeky-modern" },
+    { "id": "Archivo-black",     "display": "Archivo Black",   "body": "Archivo",        "google": "family=Archivo+Black&family=Archivo:wght@400;600", "vibe": "bold athletic" },
+    { "id": "clamp-cormorant",   "display": "Cormorant Garamond","body": "Jost",         "google": "family=Cormorant+Garamond:wght@500;600&family=Jost:wght@400;500", "vibe": "boutique, refined" },
+    { "id": "sora",              "display": "Sora",            "body": "Sora",           "google": "family=Sora:wght@400;600;800", "vibe": "startup clean" },
+    { "id": "outfit-fraunces",   "display": "Fraunces",        "body": "Outfit",         "google": "family=Fraunces:ital,opsz,wght@0,9..144,600;1,9..144,400&family=Outfit:wght@400;600", "vibe": "friendly premium" },
+    { "id": "bricolage",         "display": "Bricolage Grotesque","body": "Instrument Sans","google": "family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Instrument+Sans:wght@400;600", "vibe": "trendy design-studio" }
+  ],
+  "layouts": [
+    { "id": "split-hero",     "desc": "Hero = 50/50 split (left text, right image collage), asymmetric, no centered block" },
+    { "id": "fullbleed-hero", "desc": "Hero = full viewport background image + bottom-left text block, transparent nav that solidifies on scroll" },
+    { "id": "bento-grid",     "desc": "Hero = bento/masonry grid of unequal tiles (hours, offer, rating, photo) with hover lift" },
+    { "id": "marquee-band",   "desc": "Thin top marquee strip with offers, then oversized single-line heading, then horizontal scroll cards" },
+    { "id": "sticky-two-col", "desc": "Left column sticky (brand + CTA + hours), right column scrolls through sections" },
+    { "id": "editorial-list", "desc": "Numbered editorial list (01/02/03) for services, hairline dividers, big type, minimal cards" }
+  ],
+  "heroes": [
+    { "id": "photo-mask",   "desc": "heading line-mask reveal animation (each line slides up behind a clip)" },
+    { "id": "kicker",       "desc": "tiny uppercase kicker + huge 2-line heading + one supporting paragraph + dual CTA" },
+    { "id": "ticker",       "desc": "auto-scrolling ticker of menu items / services under the hero" },
+    { "id": "rating-first", "desc": "star rating + review count above the fold as the trust hook, then heading" },
+    { "id": "offer-badge",  "desc": "rotating circular badge sticker ('NEW — BOOK ON WHATSAPP') overlapping the hero image" },
+    { "id": "type-only",    "desc": "no image in hero: just massive typography, an underline flourish, and a ghost button" }
+  ],
+  "textures": [
+    "subtle SVG grain overlay (opacity 0.035)",
+    "repeating diagonal hairlines behind hero",
+    "large radial glow behind accent text",
+    "dotted grid background on one section only",
+    "soft noise via inline SVG feTurbulence",
+    "two-tone diagonal section divider (clip-path)"
+  ],
+  "rules": [
+    "max 2 fonts, exactly 1 accent colour used for actions only",
+    "radius must be consistent: pick one of 0px, 10px, 18px, 999px and stick to it",
+    "no box-shadow bigger than 0 18px 40px -18px rgba(0,0,0,.35)",
+    "one deliberate asymmetry somewhere (offset image, overlapping card)",
+    "sections separated by spacing, not by borders everywhere",
+    "sticky bottom CTA bar only on mobile (max-width 640px)"
+  ]
+}

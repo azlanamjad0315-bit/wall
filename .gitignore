@@ -1,0 +1,42 @@
+# secrets
+.env
+.env.local
+*.pem
+*.key
+
+# local data / caches
+gateway/data/
+gateway/cache/
+gateway/__pycache__/
+gateway/**/__pycache__/
+*.pyc
+.venv/
+venv/
+sites/
+n8n/data/
+waha/
+baserow/
+cache/
+logs/
+*.log
+
+# calling module downloads (models are huge)
+calling/models/
+calling/media/
+calling/.piper/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+calling/last-call.json
+waha-qr.png
+gateway/.venv/
+tools/__pycache__/
+
+waha-media/
+ollama/
+*.ogg
+*.sqlite

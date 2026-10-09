@@ -1,0 +1,914 @@
+{
+  "name": "04-followup-report",
+  "nodes": [
+    {
+      "id": "a65fceea-ebcc-5bf5-bf82-456118034a37",
+      "name": "Daily 21:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $env.REPORT_CRON }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "after the send windows (REPORT_CRON in .env)"
+    },
+    {
+      "id": "82f4539c-bb79-5a6e-a3d0-d91acda4e899",
+      "name": "Read CRM · raw",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_field_names",
+              "value": "true"
+            },
+            {
+              "name": "limit",
+              "value": "100000"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Baserow (self-hosted, free). Swap to Google Sheets: docs/crm.md",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "0065054a-db33-5ba2-8159-c11a208264e5",
+      "name": "Read CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// Baserow row -> flat lead object + a few derived helpers every workflow needs\nconst src = $input.first().json || {};\nconst rows = Array.isArray(src.results) ? src.results : [];\nconst today = new Date().toISOString().slice(0, 10);\nconst clean = rows.map(r => {\n  const f = {};\n  for (const [k, v] of Object.entries(r)) {\n    if (v === null || v === undefined) { f[k] = ''; continue; }\n    f[k] = (typeof v === 'object' && !Array.isArray(v)) ? (v.text ?? v.value ?? JSON.stringify(v)) : v;\n  }\n  f.row_id = r.id ?? '';\n  const d = s => (s ? Math.floor((Date.now() - new Date(String(s).slice(0, 10)).getTime()) / 864e5) : 9999);\n  f._days_since_out = d(f.sent_at);\n  f._days_since_in = d(f.last_inbound);\n  f._contacted_today = String(f.sent_at || '').startsWith(today);\n  return f;\n});\n// 'keys' is what scan must NOT return again. Retryable statuses are deliberately left out,\n// so yesterday's demo_failed / stalled leads get one more shot today.\nconst RETRYABLE = ['demo_failed', 'scanned', 'stalled', 'deploy_pending'];\nreturn [{ json: { rows: clean,\n                  keys: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) < 0)\n                        .map(r => r.lead_key).filter(Boolean).join(','),\n                  retryable: clean.filter(r => RETRYABLE.indexOf(String(r.status || '')) >= 0).length,\n                  count: clean.length, today, empty: clean.length === 0 } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "8e025da3-5cf9-5db6-8285-1613bbd63342",
+      "name": "Stage follow-ups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// the ladder: contacted -> nudge(d2) -> value(d5) -> close(d10); interested+unpaid -> reminder(+1d)\nconst rows = (($input.first().json || {}).rows) || [];\nconst today = new Date().toISOString().slice(0, 10);\nconst MAXF = parseInt($env.MAX_FOLLOWUPS || '2', 10);\nconst SKIP = ['not_interested', 'paid', 'payment_claimed', 'closed_noreply', 'demo_failed',\n              'inbound_unmatched', 'auto_reply', 'spam'];\nconst out = [];\nfor (const r of rows) {\n  const st = String(r.status || '');\n  const days = Number(r._days_since_out !== undefined ? r._days_since_out : 9999);\n  const fu = Number(r.followup_count || 0);\n  if (!r.lead_key || SKIP.indexOf(st) >= 0) continue;\n  if (!r.whatsapp && !r.phone) continue;\n  if (st === 'contacted' || st === 'replied' || st === 'negotiating' || st === 'revision_requested'\n      || st === 'followup_sent' || st === 'stalled') {\n    if (fu >= MAXF) {\n      out.push({ json: { op: 'upsert', row_id: r.row_id, lead_key: r.lead_key, business_name: r.business_name,\n        status: 'closed_noreply', demo_url: r.demo_url,\n        notes: (String(r.notes || '') + ' | auto-closed after ' + fu + ' follow-ups').slice(-1500),\n        next_action_at: '', _close_only: true } });\n      continue;\n    }\n    let sg = '';\n    if (days >= 2 && fu === 0) sg = 'nudge';\n    else if (days >= 5 && fu >= 1) sg = 'value';\n    else if (days >= 10) sg = 'close';\n    if (!sg) continue;\n    out.push({ json: { ...r, _fu: sg } });\n    continue;\n  }\n  if (st === 'interested' && String(r.paid || 'no') !== 'yes') {\n    const since = Number(r._days_since_in || 0);\n    if (since >= 1 && fu === 0) { out.push({ json: { ...r, _fu: 'payment_reminder' } }); continue; }\n    if (since >= 7) out.push({ json: { op: 'upsert', row_id: r.row_id, lead_key: r.lead_key,\n      business_name: r.business_name, status: 'stalled', demo_url: r.demo_url,\n      notes: (String(r.notes || '') + ' | bola interested, payment nahi aaya').slice(-1500),\n      next_action_at: today, _close_only: true } });\n    continue;\n  }\n  if ((st === 'demo_ready' || st === 'queued') && !r.demo_url) {\n    out.push({ json: { op: 'upsert', row_id: r.row_id, lead_key: r.lead_key, business_name: r.business_name,\n      status: 'demo_failed', notes: (String(r.notes || '') + ' | demo_url missing -> 01 rerun').slice(-1500),\n      _close_only: true } });\n  }\n}\nif (!out.length) return [{ json: { empty: true } }];\nreturn out;",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "32acf6a1-291a-5fab-abe0-4bd9fbfb6b43",
+      "name": "Kuch pending?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c5a202b1-7a81-4085-a336-e6ca72af7aa7",
+              "leftValue": "={{ $json.empty !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9443c95b-3603-527a-a5f5-53d050f6f571",
+      "name": "Per follow-up",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1420,
+        40
+      ],
+      "parameters": {
+        "options": {
+          "batchSize": 1,
+          "reset": false
+        }
+      }
+    },
+    {
+      "id": "a21fbd66-1871-592c-8351-6dca8de8e979",
+      "name": "Send message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "677d1fb0-296f-4dcc-9789-552f2030f04e",
+              "leftValue": "={{ $json._close_only !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "close-only rows are recorded, never messaged"
+    },
+    {
+      "id": "d2eb515d-28dd-55f2-b990-ff00a62f6931",
+      "name": "AI: follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/ai/chat' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "followup"
+            },
+            {
+              "name": "fast",
+              "value": "true"
+            },
+            {
+              "name": "vars",
+              "value": "={{ JSON.stringify({ stage: $('Per follow-up').item.json._fu, business_name: $('Per follow-up').item.json.business_name, category_label: $('Per follow-up').item.json.category_label, city: $('Per follow-up').item.json.city, area: $('Per follow-up').item.json.area, demo_url: $('Per follow-up').item.json.demo_url, price_label: $('Per follow-up').item.json.price_label, days_since_contact: String($('Per follow-up').item.json._days_since_out||0), language: $('Per follow-up').item.json.language||'auto', pay_methods: $env.PAY_METHODS, offer_text: $env.OFFER_TEXT, previous_messages: String($('Per follow-up').item.json.notes||'').slice(-500), delivery_time_text: $env.DELIVERY_TIME_TEXT, agency_name: $env.AGENCY_NAME, owner_name: $env.AGENCY_NAME, user: 'Write exactly this one follow-up.' }) }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "prompts/followup.md decides nudge/value/close/payment_reminder",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "d2cce312-7d79-5f79-90f4-8965d7381a6b",
+      "name": "Sanity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const lead = $('Per follow-up').item.json;\nconst j = $input.first().json || {};\nlet m = String(j.text || j.message || '').trim().replace(/```/g, '');\nconst BANNED = /(dear sir|guaranteed|100% free|limited offer|last chance|final notice|only \\d+ slots|\\ud83d\\ude80|\\ud83d\\udcc8)/i;\nif (!m || m.length > 420 || BANNED.test(m)) {\n  const link = String(lead.demo_url || '');\n  m = (lead.business_name || 'aap') + ', ' + (link ? link + '\\n' : '') +\n      (String(lead.language || '').indexOf('urdu') >= 0 || ['PK','BD','IN'].includes(String(lead.country||'').toUpperCase())\n        ? 'Abhi bhi dekh sakte hain \\u2014 koi charge nahi. Kaam nahi to bas \\u201cnahi\\u201d bol dein.'\n        : 'Still there if you want it \\u2014 no charge. If not, just say no.');\n}\nconst phone = String(lead.whatsapp || lead.phone || '').replace(/\\D/g, '');\nreturn [{ json: { chatId: phone ? phone + '@c.us' : '', body: m.slice(0, 420), stage: lead._fu,\n                  lead_key: lead.lead_key, row_id: lead.row_id } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "efef0d44-6257-57c1-9b32-63207d1f45f8",
+      "name": "WAHA: sendText",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2460,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sendText' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session",
+              "value": "={{ $env.WAHA_SESSION }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $('Sanity').item.json.chatId }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Sanity').item.json.body }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "follow-ups go through the same session",
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "8e921e51-4e14-581a-ba05-8307b9bea0fa",
+      "name": "Record follow-up",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const lead = $('Per follow-up').item.json;\nconst gate = $('Sanity').item.json;\nconst r = $input.first().json || {};\nconst ok = !r.error && (r.id || r.messageId);\nconst closing = gate.stage === 'close';\nreturn [{ json: { op: 'upsert', row_id: lead.row_id || '', lead_key: lead.lead_key,\n  business_name: lead.business_name, followup_count: (Number(lead.followup_count) || 0) + 1,\n  status: closing ? 'closed_noreply' : (gate.stage === 'payment_reminder' ? 'interested' : 'followup_sent'),\n  last_outbound: gate.body, sent_at: ok ? new Date().toISOString().slice(0, 10) : (lead.sent_at || ''),\n  demo_url: lead.demo_url, outbound_count: (Number(lead.outbound_count) || 0) + (ok ? 1 : 0),\n  notes: (String(lead.notes || '') + ' | ' + gate.stage + (ok ? ' sent' : ' FAILED')).slice(-1500),\n  next_action_at: closing ? '' : new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "4c90cfcc-9e73-53ab-b20c-47452eb806a8",
+      "name": "Record close",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nreturn [{ json: j }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "c1d488db-1851-54f9-a72b-55269dc5aa5a",
+      "name": "Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// join the two branches so the delay/loop has one input\nreturn $input.all().map(i => ({ json: { op: 'upsert', ...(i.json || {}) } }));",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "bfb00148-aa61-5040-8e4b-55a8433b5974",
+      "name": "CRM: save · body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// drop control keys, stringify objects, keep numbers as numbers -> Baserow user_field_names API\nconst j = $input.first().json || {};\nconst skip = new Set(['row_id', 'op', 'target', 'empty', 'skip', 'why']);\nconst b = {};\nfor (const [k, v] of Object.entries(j)) {\n  if (skip.has(k) || v === undefined || v === null) continue;\n  b[k] = (typeof v === 'object') ? JSON.stringify(v).slice(0, 1500) : v;\n}\nreturn [{ json: { row_id: j.row_id ? String(j.row_id) : '', body_json: JSON.stringify(b),\n                  field_count: Object.keys(b).length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "notesInFlow": true,
+      "notes": "upsert: PATCH if row_id, else POST",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "758e24c6-1ab9-5768-85a0-cdaafc423ffc",
+      "name": "CRM: save · exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2720,
+        240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "8c0e9774-febb-44a3-9d46-f1943733dcf4",
+              "leftValue": "={{ Boolean($json.row_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f24692a4-da84-5f17-a7d6-8cc92ce5fb7e",
+      "name": "CRM: save · update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/' + $json.row_id + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "156bae83-7ef9-5a69-855f-a40bae14a904",
+      "name": "CRM: save · create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.BASEROW_URL + '/api/database/rows/table/' + $env.BASEROW_TABLE_ID + '/?user_field_names=true' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Token ' + $env.BASEROW_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body_json }}"
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "a6d0fb66-795b-5eb4-b2a1-bd26b0636435",
+      "name": "Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3240,
+        40
+      ],
+      "parameters": {
+        "amount": "={{ 150 + Math.floor(Math.random() * 200) }}",
+        "unit": "seconds"
+      },
+      "notesInFlow": true,
+      "notes": "follow-ups are outreach too \\u2014 keep the pace human",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "7b32b81c-63e4-57b1-a280-7e804f0710c7",
+      "name": "Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// the whole dashboard in one message. Numbers you can act on, not vanity charts.\nconst rows = ($('Read CRM').item.json || {}).rows || [];\nconst n = s => rows.filter(r => String(r.status || '') === s).length;\nconst touched = rows.filter(r => ['contacted','replied','interested','negotiating','paid','followup_sent',\n  'revision_requested','stalled','closed_noreply','payment_claimed','send_failed']\n  .includes(String(r.status || ''))).length;\nconst replied = rows.filter(r => (Number(r.reply_count) || 0) > 0).length;\nconst paid = rows.filter(r => String(r.paid || 'no') === 'yes').length;\nconst ready = rows.filter(r => r.demo_url).length;\nconst intents = {};\nfor (const r of rows) if (r.intent) intents[r.intent] = (intents[r.intent] || 0) + 1;\nconst rate = touched ? Math.round(replied / touched * 100) : 0;\nconst hot = rows.filter(r => ['interested','negotiating','payment_claimed','handoff','revision_requested']\n  .includes(String(r.status || ''))).slice(0, 8)\n  .map(r => '\\u2022 ' + (r.business_name || '?') + ' [' + r.status + '] ' + (r.whatsapp || r.phone || ''));\nconst fails = rows.filter(r => r.status === 'demo_failed').length\n            + rows.filter(r => r.status === 'send_failed').length;\nreturn [{ json: {\n  total: rows.length, ready, touched, replied, rate, interested: n('interested'),\n  negotiating: n('negotiating'), payment_claimed: n('payment_claimed'), paid, dead: n('not_interested'),\n  fails, revenue: paid + ' \\u00d7 ' + ($env.PRICE_LABEL || 'price'),\n  intents: Object.entries(intents).map(([k, v]) => k + ':' + v).join('  '),\n  todo: hot.join('\\n') || '(aaj koi reply nahi \\u2014 wording badalne ka waqt)',\n  advice: rate < 12 && touched > 8 ? 'Reply rate ' + rate + '% \\u2192 pehli line kamzor hai. Safety gate '\n      + rows.filter(r => String(r.ai_notes||'').includes('fallback')).length + ' baar fallback use kar raha tha.'\n    : touched < 12 ? 'Volume kam \\u2192 config/campaigns me areas barhayein ya MAX_LEADS_PER_DAY badhayein'\n    : n('interested') > 0 && paid === 0 ? 'Interested bohat, paid zero \\u2192 payment ke baad ka step '\n        'aur fast karein (site 2 ghante me live)'\n    : 'Funnel theek \\u2192 PRICE_LABEL test karein (+20-30% aksar chalega)',\n  followups: rows.filter(r => r.status === 'followup_sent').length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "ec1f0d30-bfac-5e15-9a17-455ee80cc352",
+      "name": "Portfolio page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/site/portfolio' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "rows_json",
+              "value": "={{ JSON.stringify((($('Read CRM').item.json || {}).rows || []).filter(r => r.demo_url).slice(0, 60).map(r => ({demo_url: r.demo_url, title: r.business_name, category_label: r.category_label, city: r.city, emoji: r.emoji || '\\ud83c\\udfea'}))) }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "aapki demos ki public gallery \\u2014 sabse sasta sales tool",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "65ad9a7f-50e7-5878-8116-0e985c242738",
+      "name": "Attach portfolio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        440
+      ],
+      "parameters": {
+        "jsCode": "const p = $input.first().json || {};\nconst m = $('Metrics').item.json;\nreturn [{ json: { ...m, portfolio: p.url || (p.error ? 'skipped' : '') } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "4e8af6d6-f732-5a04-b3cf-74db066ef8c6",
+      "name": "Telegram: daily report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        440
+      ],
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $env.TELEGRAM_CHAT_ID }}"
+            },
+            {
+              "name": "text",
+              "value": "={{\n  \"<b>\\ud83d\\udcca Daily \\u2014 \" + $json.total + \" leads (CRM)</b>\\n\" +\n  \"demos live: \" + $json.ready + \"\\nbheje: \" + $json.touched + \"\\nreplies: \" + $json.replied +\n  \" (\" + $json.rate + \"%)\\n\" +\n  \"interested: \" + $json.interested + \" | negotiating: \" + $json.negotiating +\n  \" | paid-claim: \" + $json.payment_claimed + \"\\n\\ud83d\\udcb0 paid: \" + $json.paid + \"  (\" + $json.revenue + \")\" +\n  \"\\ndeclined: \" + $json.dead + \" | failures: \" + $json.fails +\n  ($json.intents ? \"\\nintents: \" + $json.intents : \"\") +\n  \"\\n\\n<b>\\ud83d\\udea6 Aaj/kaal ka kaam:</b>\\n\" + $json.todo +\n  \"\\n\\n\\ud83d\\udca1 \" + $json.advice +\n  ($json.portfolio ? \"\\n\\ud83d\\uddbc portfolio: \" + $json.portfolio : \"\")\n}}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "HTML"
+            },
+            {
+              "name": "disable_web_page_preview",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "roz raat 9 baje \\u2014 yahi aapka poora business dashboard hai",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Read CRM · raw": {
+      "main": [
+        [
+          {
+            "node": "Read CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 21:00": {
+      "main": [
+        [
+          {
+            "node": "Read CRM · raw",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CRM": {
+      "main": [
+        [
+          {
+            "node": "Stage follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Kuch pending?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kuch pending?": {
+      "main": [
+        [
+          {
+            "node": "Per follow-up",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Per follow-up": {
+      "main": [
+        [
+          {
+            "node": "Send message?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send message?": {
+      "main": [
+        [
+          {
+            "node": "AI: follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record close",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: follow-up": {
+      "main": [
+        [
+          {
+            "node": "Sanity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanity": {
+      "main": [
+        [
+          {
+            "node": "WAHA: sendText",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA: sendText": {
+      "main": [
+        [
+          {
+            "node": "Record follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record follow-up": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record close": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "CRM: save · body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save · body": {
+      "main": [
+        [
+          {
+            "node": "CRM: save · exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save · exists?": {
+      "main": [
+        [
+          {
+            "node": "CRM: save · update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: save · create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save · update": {
+      "main": [
+        [
+          {
+            "node": "Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: save · create": {
+      "main": [
+        [
+          {
+            "node": "Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delay": {
+      "main": [
+        [
+          {
+            "node": "Per follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Metrics": {
+      "main": [
+        [
+          {
+            "node": "Portfolio page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Portfolio page": {
+      "main": [
+        [
+          {
+            "node": "Attach portfolio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach portfolio": {
+      "main": [
+        [
+          {
+            "node": "Telegram: daily report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "versionId": "9efc01d6-8784-47e2-8beb-38f8dcbc1f43"
+}

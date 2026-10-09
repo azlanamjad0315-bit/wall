@@ -1,0 +1,108 @@
+{
+  "_readme": [
+    "Yeh file do jagah use hoti hai:",
+    "1) gateway/leads.py -> 'selectors' se OpenStreetMap Overpass query banti hai (kaunsi businesses dhoondhni hain)",
+    "2) prompts/site-generator.md -> 'brief' AI ko batata hai ke us category ki site me kya hona chahiye",
+    "Naya niche add karna ho to ek entry copy-paste karke tag badal dein. Bas.",
+    "Overpass selector syntax: nwr = (node/way/relation). 'name' mandatory hai warna无名 leads aa jaate hain."
+  ],
+  "niches": {
+    "restaurant": {
+      "label": "Restaurant / Cafe",
+      "emoji": "🍽️",
+      "selectors": [
+        "nwr[\"amenity\"~\"^(restaurant|cafe|fast_food|bakery|ice_cream|food_court|pub|bar)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Hero me signature dish + 'Order on WhatsApp' button. Sections: hero, must-try menu (5-8 items with PKR prices), timings + map, gallery, reviews strip, WhatsApp order CTA, footer. Dark/warm palette, food-first imagery, big appetising photos.",
+      "cta_label": "Order on WhatsApp",
+      "extra_sections": ["Menu highlights", "Opening hours", "Live map", "How to order"]
+    },
+    "salon": {
+      "label": "Beauty Salon / Spa",
+      "emoji": "💇",
+      "selectors": [
+        "nwr[\"shop\"~\"^(hairdresser|beauty|massage|cosmetics)$\"][\"name\"](bbox);",
+        "nwr[\"leisure\"~\"^(spa|fitness_centre)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Elegant, light, feminine/neutral palette (blush, cream, gold accents). Sections: hero with 'Book appointment', services + price list, before/after gallery grid, stylist profiles, booking WhatsApp CTA, timings + map. Soft shadows, rounded cards.",
+      "cta_label": "Book on WhatsApp",
+      "extra_sections": ["Services & Prices", "Gallery", "Book now", "Timings"]
+    },
+    "gym": {
+      "label": "Gym / Fitness",
+      "emoji": "🏋️",
+      "selectors": [
+        "nwr[\"leisure\"~\"^(fitness_centre|sports_centre|swimming_pool)$\"][\"name\"](bbox);",
+        "nwr[\"sport\"~\".*\"][\"leisure\"~\"^(fitness_centre|sports_centre)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Bold high-contrast dark theme, neon accent (lime/orange/red), condensed uppercase headings. Sections: hero with free-trial offer, membership pricing table (3 plans), class timetable, trainers, transformation results, WhatsApp 'Book free trial' CTA.",
+      "cta_label": "Book free trial",
+      "extra_sections": ["Membership plans", "Class timetable", "Trainers", "Free trial"]
+    },
+    "clinic": {
+      "label": "Clinic / Doctor / Dental",
+      "emoji": "🩺",
+      "selectors": [
+        "nwr[\"amenity\"~\"^(clinic|doctors|dentist|pharmacy|hospital|veterinary)$\"][\"name\"](bbox);",
+        "nwr[\"healthcare\"~\".*\"][\"name\"](bbox);"
+      ],
+      "brief": "Trust-first, clean and calm (white + teal/blue), generous spacing, no gimmicks. Sections: hero with 'Book appointment' + timings, doctors list with specialisation, services (with prices if known), patient FAQs, map + directions, WhatsApp appointment CTA. Add a visible 'Walk-ins welcome' note.",
+      "cta_label": "Book appointment",
+      "extra_sections": ["Our doctors", "Services", "FAQs", "Directions"]
+    },
+    "realestate": {
+      "label": "Real Estate / Interior",
+      "emoji": "🏢",
+      "selectors": [
+        "nwr[\"office\"~\"^(estate_agent|estate_agency)$\"][\"name\"](bbox);",
+        "nwr[\"shop\"~\"^(interior_decoration|furniture|kitchen)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Premium, magazine-like layout: full-bleed images, serif display font, muted luxury palette (charcoal + gold / deep green). Sections: hero with project name + CTA, featured properties/projects grid with cards (beds/baths/area or sqft), payment plan, location map, agent WhatsApp CTA, enquiry form (mailto fallback).",
+      "cta_label": "Talk to an agent",
+      "extra_sections": ["Featured projects", "Payment plan", "Location", "Enquiry"]
+    },
+    "retail": {
+      "label": "Shop / Retail / Electronics",
+      "emoji": "🛍️",
+      "selectors": [
+        "nwr[\"shop\"~\"^(clothes|shoes|mobile_phone|electronics|convenience|supermarket|jewelry|boutique|sports|toys|books|gift)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Catalogue style: product grid with prices, category chips, offers banner, home-delivery note, 'Order / check price on WhatsApp' CTA, shop timings + map. Bright, retail-y palette.",
+      "cta_label": "Order on WhatsApp",
+      "extra_sections": ["Best sellers", "Categories", "Today's offers", "Delivery"]
+    },
+    "education": {
+      "label": "School / Academy / Tutor",
+      "emoji": "🎓",
+      "selectors": [
+        "nwr[\"amenity\"~\"^(school|kindergarten|college|language_school|music_school)$\"][\"name\"](bbox);",
+        "nwr[\"craft\"~\".*\"][\"name\"](bbox);"
+      ],
+      "brief": "Friendly, credible. Sections: hero with admission-open banner, courses/programs with fees, faculty, results/testimonials, campus gallery, fee schedule, admission enquiry on WhatsApp, map + timings.",
+      "cta_label": "Admission enquiry",
+      "extra_sections": ["Programs & Fees", "Faculty", "Results", "Admissions"]
+    },
+    "services": {
+      "label": "Local Service (AC repair / plumber / tailor / etc.)",
+      "emoji": "🔧",
+      "selectors": [
+        "nwr[\"craft\"~\"^(electrician|plumber|carpenter|painter|tiler|roofer|locksmith|glazier)$\"][\"name\"](bbox);",
+        "nwr[\"shop\"~\"^(dry_cleaning|laundry|tailor|shoemaker|hardware)$\"][\"name\"](bbox);",
+        "nwr[\"amenity\"~\"^(beauty|barber)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Ultra-practical one-pager: 'Call / WhatsApp now' above the fold, services list with typical price ranges, 3-step how-it-works, service area + timings, reviews, big sticky call button. Trust badges (years of work, visits same day).",
+      "cta_label": "Get a quote on WhatsApp",
+      "extra_sections": ["Services", "How it works", "Service area"]
+    },
+    "hotel": {
+      "label": "Hotel / Guest House",
+      "emoji": "🏨",
+      "selectors": [
+        "nwr[\"tourism\"~\"^(hotel|motel|guest_house|hostel)$\"][\"name\"](bbox);"
+      ],
+      "brief": "Calming luxury: full-width room gallery, room types with rates, amenities icon row (wifi, parking, AC, breakfast), location/nearby attractions, 'Book on WhatsApp' CTA, policy/checkout info.",
+      "cta_label": "Book a room",
+      "extra_sections": ["Rooms & rates", "Amenities", "Nearby", "Booking"]
+    }
+  }
+}

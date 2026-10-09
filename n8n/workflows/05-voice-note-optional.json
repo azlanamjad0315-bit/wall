@@ -1,0 +1,281 @@
+{
+  "name": "05-voice-note-optional",
+  "nodes": [
+    {
+      "id": "9d5c1197-b63d-56ca-a200-fc6a13d96765",
+      "name": "Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-note",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "curl -X POST localhost:5678/webhook/voice-note -d '{\"phone\":\"92300...\",\"business_name\":\"Bismillah Bakers\"}'"
+    },
+    {
+      "id": "eb304cc7-f504-54d2-95ed-40cd3dbd0a4d",
+      "name": "Done",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "58b89fed-e1ac-5466-bb26-bba951bfb0e1",
+      "name": "AI: 35-word spoken script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        40
+      ],
+      "parameters": {
+        "url": "={{ $env.GATEWAY_URL + '/v1/ai/chat' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Gateway-Token",
+              "value": "={{ $env.GATEWAY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "voicenote"
+            },
+            {
+              "name": "vars",
+              "value": "={{ JSON.stringify({ business_name: $json.business_name || 'aapki dukaan', category_label: $json.category_label || 'business', city: $json.city || 'Karachi', demo_url: $json.demo_url || '', offer_text: $env.OFFER_TEXT, price_label: $env.PRICE_LABEL, agency_name: $env.AGENCY_NAME, owner_name: $env.AGENCY_NAME, language: $json.language || 'roman-urdu', user: 'Write the spoken script now.' }) }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "spoken style != written style: short sentences, no numbers longer than 4 digits",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "6e711709-7c28-57af-9cd3-d7a9437556a2",
+      "name": "TTS: make audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        40
+      ],
+      "parameters": {
+        "url": "={{ 'http://voicenote:8090/tts' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $('AI: 35-word spoken script').item.json.text }}"
+            },
+            {
+              "name": "voice",
+              "value": "={{ $json.voice || '' }}"
+            }
+          ]
+        }
+      },
+      "notesInFlow": true,
+      "notes": "docker compose --profile voicenote up -d  (free: edge/gtts/piper)",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 1,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "da190b05-9ba3-577f-a9e5-096e3a5e1d34",
+      "name": "WAHA: sendVoice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        240
+      ],
+      "parameters": {
+        "url": "={{ $env.WAHA_URL + '/api/sendVoice' }}",
+        "options": {
+          "timeout": 900000,
+          "response": {
+            "neverError": true,
+            "responseFormat": "json"
+          }
+        },
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "={{ $env.WAHA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ session: $env.WAHA_SESSION, chatId: String($('Request').item.json.phone || '').replace(/[^0-9]/g,'') + '@c.us', file: { url: $('TTS: make audio').item.json.url, fileName: $('TTS: make audio').item.json.filename } }) }}"
+      },
+      "notesInFlow": true,
+      "notes": "nested file.url needs a JSON body (not keypair); WAHA fetches it inside the net",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "088294c8-7676-581e-95e0-7f5fb434971e",
+      "name": "Explain failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nreturn [{ json: { ok: false, error: String(j.error || j.message || 'failed').slice(0, 400),\n                  hint: j.error ? 'check: docker compose --profile voicenote up -d ; GATEWAY_URL; WAHA session' : '' } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Request": {
+      "main": [
+        [
+          {
+            "node": "AI: 35-word spoken script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: 35-word spoken script": {
+      "main": [
+        [
+          {
+            "node": "TTS: make audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TTS: make audio": {
+      "main": [
+        [
+          {
+            "node": "WAHA: sendVoice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA: sendVoice": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explain failure": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "versionId": "da7ff9df-bb3f-48ce-9af7-6e5fcc055b03"
+}

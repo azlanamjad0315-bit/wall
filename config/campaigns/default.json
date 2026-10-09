@@ -1,0 +1,88 @@
+{
+  "_readme": [
+    "Yeh aapke target campaigns hain. Ek campaign = ek area-list + niches.",
+    "areas: woh text jo Google Maps me type karte hain (Nominatim usko geocode karega).",
+    "       Jitne zyada chhote areas (mohalla/town level), utne better results.",
+    "niches: config/niches.json ki keys. 'all' = saare enabled niches.",
+    "language: auto = PK/BD/IN leads pe Roman Urdu, baaki sab pe English. Ya force karein: roman-urdu | english",
+    "Naya shehar add karna ho = areas me 1 line. Bas. Code me kuch nahi badalna.",
+    "enabled:false wale campaigns skip ho jaate hain."
+  ],
+  "campaigns": [
+    {
+      "name": "karachi",
+      "enabled": true,
+      "country": "PK",
+      "language": "auto",
+      "niches": ["restaurant", "salon", "gym", "clinic", "retail", "services"],
+      "limit_per_area": 12,
+      "areas": [
+        "Gulshan-e-Iqbal, Karachi",
+        "DHA Phase 5, Karachi",
+        "Clifton Block 5, Karachi",
+        "North Nazimabad, Karachi",
+        "Bahadurabad, Karachi",
+        "Korangi Sector 11-A, Karachi"
+      ]
+    },
+    {
+      "name": "lahore",
+      "enabled": true,
+      "country": "PK",
+      "language": "auto",
+      "niches": ["restaurant", "salon", "clinic", "education", "services"],
+      "limit_per_area": 10,
+      "areas": [
+        "Gulberg III, Lahore",
+        "DHA Phase 6, Lahore",
+        "Johar Town, Lahore",
+        "Model Town, Lahore"
+      ]
+    },
+    {
+      "name": "islamabad",
+      "enabled": true,
+      "country": "PK",
+      "language": "auto",
+      "niches": ["restaurant", "gym", "clinic", "salon"],
+      "limit_per_area": 10,
+      "areas": [
+        "F-7 Markaz, Islamabad",
+        "F-6 Markaz, Islamabad",
+        "G-9 Markaz, Islamabad",
+        "Saddar, Rawalpindi"
+      ]
+    },
+
+    "__comment__": "=================== NON-PAKISTAN EXAMPLES (enabled:false) ===================",
+    "__comment2__": "English outreach auto-select ho jayega, price PRICE_MAP ke 'default' se aayega.",
+
+    "dubai": {
+      "name": "dubai",
+      "enabled": false,
+      "country": "AE",
+      "language": "auto",
+      "niches": ["restaurant", "salon", "clinic", "realestate"],
+      "limit_per_area": 8,
+      "areas": ["Al Karama, Dubai", "Business Bay, Dubai", "Deira, Dubai"]
+    },
+    "london": {
+      "name": "london",
+      "enabled": false,
+      "country": "GB",
+      "language": "auto",
+      "niches": ["services", "restaurant", "salon"],
+      "limit_per_area": 8,
+      "areas": ["Whitechapel, London", "Ilford, London", "Ealing, London"]
+    },
+    "newyork": {
+      "name": "newyork",
+      "enabled": false,
+      "country": "US",
+      "language": "auto",
+      "niches": ["services", "restaurant", "salon"],
+      "limit_per_area": 8,
+      "areas": ["Jackson Heights, Queens, New York", "Brightwood, Brooklyn", "Paterson, New Jersey"]
+    }
+  ]
+}
